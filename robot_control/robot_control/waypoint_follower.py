@@ -44,8 +44,8 @@ class WaypointFollowerNode(Node):
         self.yaw_tol = float(self.get_parameter('yaw_tolerance').value)
         self.rate_hz = float(self.get_parameter('rate_hz').value)
 
-        self.linear_threshold = 0.1
-        self.angular_threshold = 0.25
+        self.linear_min = 0.1
+        self.angular_min = 0.25
 
         # Load waypoints
         waypoints_path = self.get_parameter('waypoints_path').value
@@ -111,24 +111,24 @@ class WaypointFollowerNode(Node):
         return v_cmd, w_cmd
     
     def velocity2input(self, v_cmd: float, w_cmd: float) -> Tuple[float, float]:
-        # assume that the mapping from L, R = x, x to linear speed is a linear function: y = (x - self.linear_threshold) / (0.5 - self.linear_threshold) * self.max_linear_speed
-        # assume that mapping from L, R = x, -x to angular speed is a linear function: y = (x - self.angular_threshold) / (0.5 - self.angular_threshold) * self.max_linear_speed
+        # assume that the mapping from L, R = x, x to linear speed is a linear function: y = (x - self.linear_min) / (0.5 - self.linear_min) * self.max_linear_speed
+        # assume that mapping from L, R = x, -x to angular speed is a linear function: y = (x - self.angular_min) / (0.5 - self.angular_min) * self.max_linear_speed
         # but we don't know whether we can do a simple mixture addition of both
         if v_cmd == 0 and w_cmd == 0:
             return 0.0, 0.0
         if w_cmd == 0:
-            l1 = self.linear_threshold + v_cmd * (0.5 - self.linear_threshold) / self.max_speed_mps
+            l1 = self.linear_min + v_cmd * (0.5 - self.linear_min) / self.max_speed_mps
             l1 = l1 * v_cmd / abs(v_cmd)
             r1 = l1
             return l1, r1
         elif v_cmd == 0:
-            r2 = math.copysign(self.angular_threshold + abs(w_cmd) * (0.5 - self.angular_threshold) / self.max_angular_speed_radps, w_cmd)
+            r2 = math.copysign(self.angular_min + abs(w_cmd) * (0.5 - self.angular_min) / self.max_angular_speed_radps, w_cmd)
             l2 = -1 * r2
             return l2, r2
         else:
-            l1, r1 = v_cmd * (0.5 - self.linear_threshold) / self.max_speed_mps, v_cmd * (0.5 - self.linear_threshold) / self.max_speed_mps
-            l2, r2 = -1 * w_cmd * (0.5 - self.angular_threshold) / self.max_angular_speed_radps, w_cmd * (0.5 - self.angular_threshold) / self.max_angular_speed_radps
-            l_thres, r_thres = self.linear_threshold, self.linear_threshold
+            l1, r1 = v_cmd * (0.5 - self.linear_min) / self.max_speed_mps, v_cmd * (0.5 - self.linear_min) / self.max_speed_mps
+            l2, r2 = -1 * w_cmd * (0.5 - self.angular_min) / self.max_angular_speed_radps, w_cmd * (0.5 - self.angular_min) / self.max_angular_speed_radps
+            l_thres, r_thres = self.linear_min, self.linear_min
             l = l1 + l2 + l_thres
             r = r1 + r2 + r_thres
             l = max(-self.max_norm_cmd, min(self.max_norm_cmd, l))
