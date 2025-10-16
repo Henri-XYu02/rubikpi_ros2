@@ -24,13 +24,13 @@ class WaypointFollowerNode(Node):
         self.declare_parameter('waypoints_path', 'waypoints.txt')
         self.declare_parameter('wheel_base', 0.04)  # meters (wheel radius)
         self.declare_parameter('car_width', 0.168)  # meters (car width)
-        self.declare_parameter('max_speed_mps', 5)  # approximate max linear speed
-        self.declare_parameter('max_angular_speed_radps', 2 * math.pi)  # approximate max angular speed
+        self.declare_parameter('max_speed_mps', 0.72)  # approximate max linear speed
+        self.declare_parameter('max_angular_speed_radps', math.pi)  # approximate max angular speed
         self.declare_parameter('max_norm_cmd', 0.5)  # matches motor_controller clamp
-        # self.declare_parameter('kv', 1.0)  # linear gain
-        # self.declare_parameter('kh', 1.0)  # heading gain
+        self.declare_parameter('kv', 0.8)  # linear gain
+        self.declare_parameter('kh', 0.8)  # heading gain
         self.declare_parameter('pos_tolerance', 0.05)  # meters
-        self.declare_parameter('yaw_tolerance', 0.10)  # radians (~6 deg)
+        self.declare_parameter('yaw_tolerance', 0.1)  # radians (~11 degrees)
         self.declare_parameter('rate_hz', 20.0)
 
         # Read parameters
@@ -38,14 +38,14 @@ class WaypointFollowerNode(Node):
         self.max_speed_mps = float(self.get_parameter('max_speed_mps').value)
         self.max_angular_speed_radps = float(self.get_parameter('max_angular_speed_radps').value)
         self.max_norm_cmd = float(self.get_parameter('max_norm_cmd').value)
-        # self.kv = float(self.get_parameter('kv').value)
-        # self.kh = float(self.get_parameter('kh').value)
+        self.kv = float(self.get_parameter('kv').value)
+        self.kh = float(self.get_parameter('kh').value)
         self.pos_tol = float(self.get_parameter('pos_tolerance').value)
         self.yaw_tol = float(self.get_parameter('yaw_tolerance').value)
         self.rate_hz = float(self.get_parameter('rate_hz').value)
 
         self.linear_threshold = 0.1
-        self.angular_threshold = 0.1
+        self.angular_threshold = 0.25
 
         # Load waypoints
         waypoints_path = self.get_parameter('waypoints_path').value
@@ -94,37 +94,20 @@ class WaypointFollowerNode(Node):
         return waypoints
     
     
-    # def diff2velocity_complex(self, dist: float, heading_error: float, gtheta: float, theta: float) -> Tuple[float, float]:
-    #     # When close to goal position, align to goal heading
-    #     if dist < self.pos_tol:
-    #         heading_to_target = normalize_angle(gtheta - theta)
-    #         v_cmd = 0.0
-    #         if abs(heading_to_target) < self.yaw_tol:
-    #             self.current_idx += 1
-    #             self.get_logger().info(f'Reached waypoint {self.current_idx}/{len(self.waypoints)}')
-    #             self.publish_cmd(0.0, 0.0)
-    #         w_cmd = self.kh * heading_to_target
-    #     v_cmd = max(0.0, min(self.kv * dist, self.max_speed_mps))
-    #     w_cmd = self.kh * heading_error
-    #     return v_cmd, w_cmd
-    
     def diff2velocity_simple(self, dist: float, heading_error: float, gtheta: float, theta: float) -> Tuple[float, float]:
         if dist < self.pos_tol:
-            heading_to_target = normalize_angle(gtheta - theta)
-            v_cmd = 0.0
-            if abs(heading_to_target) < self.yaw_tol:
-                # Waypoint fully reached - move to next waypoint
-                self.current_idx += 1
-                self.get_logger().info(f'Reached waypoint {self.current_idx}/{len(self.waypoints)}')
-                # Return stop command - the control_step will handle publishing
-                return 0.0, 0.0
-            # Still aligning to target heading
-            w_cmd = heading_to_target if abs(heading_to_target) < self.max_angular_speed_radps else self.max_angular_speed_radps * heading_to_target / abs(heading_to_target)
-        elif heading_error > self.yaw_tol:
-            v_cmd, w_cmd = 0.0, heading_error if abs(heading_error) < self.max_angular_speed_radps else self.max_angular_speed_radps * heading_error / abs(heading_error)
+            # Waypoint fully reached - move to next waypoint
+            self.current_idx += 1
+            self.get_logger().info(f'Reached waypoint {self.current_idx}/{len(self.waypoints)}')
+            # Return stop command - the control_step will handle publishing
+            v_cmd, w_cmd = 0.0, 0.0
+        elif abs(heading_error) > self.yaw_tol:
+            v_cmd, w_cmd = 0.0, math.copysign(self.max_angular_speed_radps, heading_error)
         else:
-            v_cmd = dist if dist < self.max_speed_mps else self.max_speed_mps
-            w_cmd = 0
+            v_cmd = self.max_speed_mps
+            w_cmd = math.copysign(self.max_angular_speed_radps * abs(heading_error) / math.pi, heading_error)
+        v_cmd = v_cmd * self.kv
+        w_cmd = w_cmd * self.kh
         return v_cmd, w_cmd
     
     def velocity2input(self, v_cmd: float, w_cmd: float) -> Tuple[float, float]:
@@ -139,13 +122,18 @@ class WaypointFollowerNode(Node):
             r1 = l1
             return l1, r1
         elif v_cmd == 0:
-            r2 = self.angular_threshold + w_cmd * (0.5 - self.angular_threshold) / self.max_angular_speed_radps
-            r2 = r2 * w_cmd / abs(w_cmd)
+            r2 = math.copysign(self.angular_threshold + abs(w_cmd) * (0.5 - self.angular_threshold) / self.max_angular_speed_radps, w_cmd)
             l2 = -1 * r2
             return l2, r2
         else:
-            print("mixture of linear and angular speed not supported yet")
-            return 0, 0
+            l1, r1 = v_cmd * (0.5 - self.linear_threshold) / self.max_speed_mps, v_cmd * (0.5 - self.linear_threshold) / self.max_speed_mps
+            l2, r2 = -1 * w_cmd * (0.5 - self.angular_threshold) / self.max_angular_speed_radps, w_cmd * (0.5 - self.angular_threshold) / self.max_angular_speed_radps
+            l_thres, r_thres = self.linear_threshold, self.linear_threshold
+            l = l1 + l2 + l_thres
+            r = r1 + r2 + r_thres
+            l = max(-self.max_norm_cmd, min(self.max_norm_cmd, l))
+            r = max(-self.max_norm_cmd, min(self.max_norm_cmd, r))
+            return l, r
 
     def control_step(self):
         now = self.get_clock().now()
@@ -189,7 +177,7 @@ class WaypointFollowerNode(Node):
         # Integrate yaw using angular velocity
         self.yaw += w_cmd * dt
         self.yaw = normalize_angle(self.yaw)
-        self.get_logger().info(f"x: {self.x_est:.2f}, y: {self.y_est:.2f}, yaw: {self.yaw:.2f}, v_cmd: {v_cmd:.2f}, w_cmd: {w_cmd:.2f}, l_norm: {l_norm:.2f}, r_norm: {r_norm:.2f}")
+        self.get_logger().info(f"x: {self.x_est:.2f}, y: {self.y_est:.2f}, yaw: {self.yaw:.2f}, v_cmd: {v_cmd:.2f}, w_cmd: {w_cmd:.2f}, l_norm: {l_norm:.2f}, r_norm: {r_norm:.2f}, heading_error: {heading_error:.2f}, dist: {dist:.2f}")
 
     def publish_cmd(self, left: float, right: float):
         msg = Float32MultiArray()
