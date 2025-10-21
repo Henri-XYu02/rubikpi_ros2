@@ -1,0 +1,20 @@
+# Waypoint file format: x, y, theta
+# x, y: position in meters (world frame)
+# theta: final orientation in radians
+# Lines starting with # are comments
+
+# Example waypoints for testing vision-based navigation
+# Origin is robot starting position
+# X-axis: forward, Y-axis: left
+
+# Waypoint 1: Move forward 1 meter
+1.0, 0.0, 0.0
+
+# Waypoint 2: Move to position near first landmark
+1.0, 0.5, 1.57
+
+# Waypoint 3: Move to second landmark area
+2.0, 1.0, 0.0
+
+# Waypoint 4: Return to start
+0.0, 0.0, 0.0

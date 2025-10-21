@@ -1,0 +1,28 @@
+{
+  "landmarks": [
+    {
+      "id": 0,
+      "x": 1.0,
+      "y": 0.5,
+      "description": "Coke can #1 - First landmark"
+    },
+    {
+      "id": 1,
+      "x": 2.0,
+      "y": 1.0,
+      "description": "Coke can #2 - Second landmark"
+    },
+    {
+      "id": 2,
+      "x": 1.5,
+      "y": 2.0,
+      "description": "Coke can #3 - Third landmark"
+    }
+  ],
+  "notes": [
+    "Landmark positions are in meters in the world frame",
+    "Origin (0, 0) is the robot's starting position",
+    "X-axis points forward, Y-axis points left",
+    "Measure and update these positions based on your actual setup"
+  ]
+}
