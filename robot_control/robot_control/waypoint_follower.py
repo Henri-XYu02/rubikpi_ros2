@@ -58,11 +58,15 @@ class WaypointFollowerNode(Node):
         self.declare_parameter('max_speed_mps', 0.72)  # approximate max linear speed
         self.declare_parameter('max_angular_speed_radps', math.pi)  # approximate max angular speed
         self.declare_parameter('max_norm_cmd', 0.5)  # matches motor_controller clamp
-        self.declare_parameter('kv', 0.8)  # linear gain
-        self.declare_parameter('kh', 0.8)  # heading gain
+        # self.declare_parameter('kv', 0.8)  # linear gain
+        # self.declare_parameter('kh', 0.8)  # heading gain
+        self.declare_parameter('kv', 0.5)  # linear gain
+        self.declare_parameter('kh', 0.5)  # heading gain
         self.declare_parameter('pos_tolerance', 0.05)  # meters
         self.declare_parameter('yaw_tolerance', 0.1)  # radians (~11 degrees)
         self.declare_parameter('rate_hz', 20.0)
+        self.declare_parameter('sweep_speed_radps', 0.8) # When we don't see any landmark. Default 0.8 rad/s (~45 deg/s)
+        self.declare_parameter('pose_correction_alpha', 0.2) # Blend factor (20% camera, 80% estimate)
 
         # Read parameters
         self.wheel_base = float(self.get_parameter('wheel_base').value)
@@ -74,6 +78,8 @@ class WaypointFollowerNode(Node):
         self.pos_tol = float(self.get_parameter('pos_tolerance').value)
         self.yaw_tol = float(self.get_parameter('yaw_tolerance').value)
         self.rate_hz = float(self.get_parameter('rate_hz').value)
+        self.sweep_speed_radps = float(self.get_parameter('sweep_speed_radps').value)
+        self.alpha = float(self.get_parameter('pose_correction_alpha').value)
 
         self.linear_min = 0.1
         self.angular_min = 0.25
@@ -105,6 +111,7 @@ class WaypointFollowerNode(Node):
 
         self.get_logger().info(f'Loaded {len(self.waypoints)} waypoints. Starting follower at {self.rate_hz:.1f} Hz')
         self.get_logger().info('Waypoint follower is in CLOSED_LOOP mode (AprilTag only).')
+        self.get_logger().info(f'Sweep speed set to {self.sweep_speed_radps:.2f} rad/s.')
 
 
     # Pose Correction 
@@ -124,20 +131,33 @@ class WaypointFollowerNode(Node):
                 timeout=Duration(seconds=0.1) # Don't wait too long
             )
 
-            # --- POSE CORRECTION ---
-            # If lookup_transform succeeded, a tag is visible and TF is working
-            old_x, old_y, old_yaw = self.x_est, self.y_est, self.yaw
+            # --- POSE BLENDING ---
             
-            self.x_est = t.transform.translation.x
-            self.y_est = t.transform.translation.y
-            
-            # Convert quaternion to euler angles (Roll, Pitch, Yaw)
-            _roll, _pitch, self.yaw = euler_from_quaternion(t.transform.rotation)
+            # Get camera measurement
+            camera_x = t.transform.translation.x
+            camera_y = t.transform.translation.y
+            _roll, _pitch, camera_yaw = euler_from_quaternion(t.transform.rotation)
 
+            # Blend X and Y (simple weighted average)
+            self.x_est = (1.0 - self.alpha) * self.x_est + self.alpha * camera_x
+            self.y_est = (1.0 - self.alpha) * self.y_est + self.alpha * camera_y
+
+            # Blend yaw (correctly, using vector components)
+            est_x_comp = math.cos(self.yaw)
+            est_y_comp = math.sin(self.yaw)
+            
+            cam_x_comp = math.cos(camera_yaw)
+            cam_y_comp = math.sin(camera_yaw)
+            
+            avg_x_comp = (1.0 - self.alpha) * est_x_comp + self.alpha * cam_x_comp
+            avg_y_comp = (1.0 - self.alpha) * est_y_comp + self.alpha * cam_y_comp
+            
+            self.yaw = math.atan2(avg_y_comp, avg_x_comp)
+            # No need for normalize_angle, atan2 returns in [-pi, pi]
+            
             self.get_logger().info(
-                f'POSE CORRECTION: Drift corrected by TF. '
-                f'Old: ({old_x:.2f}, {old_y:.2f}, {old_yaw:.2f}), '
-                f'New: ({self.x_est:.2f}, {self.y_est:.2f}, {self.yaw:.2f})'
+                f'POSE CORRECTION: Blended TF pose. '
+                f'New est: ({self.x_est:.2f}, {self.y_est:.2f}, {self.yaw:.2f})'
             )
             return True
 
@@ -256,7 +276,7 @@ class WaypointFollowerNode(Node):
 
     def control_step(self):
         """
-        Main control loop step.
+        Main control loop step. Includes sweeping for tag and pose-blending.
         1. Compute time delta since last step.
         2. Try to correct pose from TF.
         3. If all waypoints are completed, stop and return.
@@ -275,7 +295,7 @@ class WaypointFollowerNode(Node):
         self.last_time = now
 
         # Try to correct pose 
-        self.correct_pose_from_tf()
+        pose_corrected = self.correct_pose_from_tf()
         # Now, self.x_est, self.y_est, self.yaw are the "best" available pose
 
         # Check if all waypoints are completed
@@ -292,15 +312,32 @@ class WaypointFollowerNode(Node):
         dy = gy - self.y_est
         dist = math.hypot(dx, dy)
 
-        # Use current estimated yaw
-        theta = self.yaw
 
-        # Heading to goal
-        path_angle = math.atan2(dy, dx)
-        heading_error = normalize_angle(path_angle - theta)
+        log_msg_prefix = "TRAJECTORY"
+        # If we lost pose and are not at the goal, sweep to find a tag
+        if not pose_corrected and dist > self.pos_tol:
+            # --- ACTION: SWEEP ---
+            # Pose correction failed AND we are not at the goal.
+            # Override controller and rotate to find a tag.
+            self.get_logger().warn(f'Lost pose and not at goal (dist: {dist:.2f}m). Sweeping to find landmark.')
+            v_cmd = 0.0
+            w_cmd = self.sweep_speed_radps
+            log_msg_prefix = "SWEEPING"
+        else:
+            if not pose_corrected:
+                # lost pose but we are at the goal. just proceed with normal logic
+                self.get_logger().info(f'Lost pose but at goal (dist: {dist:.2f}m). Proceeding with normal control.')   
+            # either post correction succeded or we are at the goal. proceed with normal logic
 
-        # Linear and angular velocity commands (m/s, rad/s)
-        v_cmd, w_cmd = self.diff2velocity_simple(dist, heading_error, gtheta, theta)
+            # Use current estimated yaw
+            theta = self.yaw
+
+            # Heading to goal
+            path_angle = math.atan2(dy, dx)
+            heading_error = normalize_angle(path_angle - theta)
+
+            # Linear and angular velocity commands (m/s, rad/s)
+            v_cmd, w_cmd = self.diff2velocity_simple(dist, heading_error, gtheta, theta)
 
         # Convert to motor commands and publish
         l_norm, r_norm = self.velocity2input(v_cmd, w_cmd)
@@ -313,7 +350,7 @@ class WaypointFollowerNode(Node):
         # Integrate yaw using angular velocity
         self.yaw += w_cmd * dt
         self.yaw = normalize_angle(self.yaw)
-        self.get_logger().info(f"x: {self.x_est:.2f}, y: {self.y_est:.2f}, yaw: {self.yaw:.2f}, v_cmd: {v_cmd:.2f}, w_cmd: {w_cmd:.2f}, l_norm: {l_norm:.2f}, r_norm: {r_norm:.2f}, heading_error: {heading_error:.2f}, dist: {dist:.2f}")
+        self.get_logger().info(f"{log_msg_prefix}: x: {self.x_est:.2f}, y: {self.y_est:.2f}, yaw: {self.yaw:.2f}, v_cmd: {v_cmd:.2f}, w_cmd: {w_cmd:.2f}, l_norm: {l_norm:.2f}, r_norm: {r_norm:.2f}, heading_error: {heading_error:.2f}, dist: {dist:.2f}")
 
     def publish_cmd(self, left: float, right: float):
         msg = Float32MultiArray()
