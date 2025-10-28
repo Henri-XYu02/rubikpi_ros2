@@ -63,13 +63,20 @@ class WaypointFollowerNode(Node):
         self.yaw = 0.0
 
         # Tracking state
-        self.current_idx = 0
+        self.current_waypoint_idx = 0
         self.last_time = self.get_clock().now()
         self.timer = self.create_timer(1.0 / self.rate_hz, self.control_step)
 
         self.get_logger().info(f'Loaded {len(self.waypoints)} waypoints. Starting follower at {self.rate_hz:.1f} Hz')
 
     def load_waypoints(self, path: str) -> List[Tuple[float, float, float]]:
+        """
+        Load waypoints from a text file.
+        Each line in the file should contain three comma-separated values: x, y, theta (in radians).
+        Comments and empty lines are ignored.
+        :param path: Path to the waypoint file.
+        :return: List of waypoints as (x, y, theta) tuples.
+        """
         waypoints: List[Tuple[float, float, float]] = []
         try:
             if not os.path.isabs(path):
@@ -95,30 +102,60 @@ class WaypointFollowerNode(Node):
     
     
     def diff2velocity_simple(self, dist: float, heading_error: float, gtheta: float, theta: float) -> Tuple[float, float]:
+        """
+        Simple proportional controller to compute linear and angular velocity commands.
+        :param dist: Distance to the goal waypoint.
+        :param heading_error: Heading error to the goal waypoint.
+        :param gtheta: Goal orientation (not used in this simple controller).
+        :param theta: Current orientation (not used in this simple controller).
+        :return: Tuple of (v_cmd, w_cmd) in m/s and rad/s.
+        1. If within position tolerance, stop and move to next waypoint.
+        2. If heading error is large, rotate in place.
+        3. Otherwise, move forward with speed proportional to heading error.
+        4. Scale commands by kv and kh gains.
+        5. Clamp commands to max speed limits.
+        6. Return (v_cmd, w_cmd).
+        P.S. a.  The control_step function will handle publishing the commands.
+             b. This function does not handle the case of final orientation at the last waypoint.
+        
+        """
         if dist < self.pos_tol:
             # Waypoint fully reached - move to next waypoint
-            self.current_idx += 1
-            self.get_logger().info(f'Reached waypoint {self.current_idx}/{len(self.waypoints)}')
+            self.current_waypoint_idx += 1
+            self.get_logger().info(f'Reached waypoint {self.current_waypoint_idx}/{len(self.waypoints)}')
             # Return stop command - the control_step will handle publishing
             v_cmd, w_cmd = 0.0, 0.0
         elif abs(heading_error) > self.yaw_tol:
+            # Large heading error - rotate in place
             v_cmd, w_cmd = 0.0, math.copysign(self.max_angular_speed_radps, heading_error)
         else:
+            # Proceed forward
             v_cmd = self.max_speed_mps
+                # also add some angle adjustment while we are going "straight" so we can compensate for any accumulating misalignments
             w_cmd = math.copysign(self.max_angular_speed_radps * abs(heading_error) / math.pi, heading_error)
         v_cmd = v_cmd * self.kv
         w_cmd = w_cmd * self.kh
         return v_cmd, w_cmd
     
     def velocity2input(self, v_cmd: float, w_cmd: float) -> Tuple[float, float]:
+        """
+        Convert linear and angular velocity commands to normalized motor inputs.
+        :param v_cmd: Desired linear velocity in m/s. 
+        :param w_cmd: Desired angular velocity in rad/s.
+        :return: Tuple of (left_motor_input, right_motor_input) in range [-max_norm_cmd, max_norm_cmd].
+        Note: This function assumes a linear mapping from velocity commands to motor inputs.
+        """
         # assume that the mapping from L, R = x, x to linear speed is a linear function: y = (x - self.linear_min) / (0.5 - self.linear_min) * self.max_linear_speed
         # assume that mapping from L, R = x, -x to angular speed is a linear function: y = (x - self.angular_min) / (0.5 - self.angular_min) * self.max_linear_speed
         # but we don't know whether we can do a simple mixture addition of both
         if v_cmd == 0 and w_cmd == 0:
             return 0.0, 0.0
         if w_cmd == 0:
+            # pure forward/backward. it's either .1 or 80% * (inputPower / .72metersPerSec). 
+            # get rid of deadzone (0.1). scale linearly to max speed
             l1 = self.linear_min + v_cmd * (0.5 - self.linear_min) / self.max_speed_mps
-            l1 = l1 * v_cmd / abs(v_cmd)
+            l1 = l1 * v_cmd / abs(v_cmd) #if the waypoint is behind us and we don't turn then just go backward
+                                         # but currect strategy doesn't move backward. Just turns
             r1 = l1
             return l1, r1
         elif v_cmd == 0:
@@ -126,6 +163,7 @@ class WaypointFollowerNode(Node):
             l2 = -1 * r2
             return l2, r2
         else:
+            # mixture of both
             l1, r1 = v_cmd * (0.5 - self.linear_min) / self.max_speed_mps, v_cmd * (0.5 - self.linear_min) / self.max_speed_mps
             l2, r2 = -1 * w_cmd * (0.5 - self.angular_min) / self.max_angular_speed_radps, w_cmd * (0.5 - self.angular_min) / self.max_angular_speed_radps
             l_thres, r_thres = self.linear_min, self.linear_min
@@ -136,6 +174,18 @@ class WaypointFollowerNode(Node):
             return l, r
 
     def control_step(self):
+        """
+        Main control loop step.
+        1. Compute time delta since last step.
+        2. If all waypoints are completed, stop and return.
+        3. Get current goal waypoint.
+        4. Compute distance and heading error to goal.
+        5. Compute velocity commands using diff2velocity_simple.
+        6. Convert to motor commands and publish.
+        7. Integrate position and orientation estimate using commanded velocities.
+        8. Log current state.
+        :return: None
+        """
         now = self.get_clock().now()
         dt = (now - self.last_time).nanoseconds / 1e9
         if dt < 0.0001:
@@ -143,13 +193,13 @@ class WaypointFollowerNode(Node):
         self.last_time = now
 
         # Check if all waypoints are completed
-        if self.current_idx >= len(self.waypoints):
+        if self.current_waypoint_idx >= len(self.waypoints):
             self.publish_cmd(0.0, 0.0)
             self.get_logger().info('All waypoints completed!')
             return
 
         # Desired waypoint
-        gx, gy, gtheta = self.waypoints[self.current_idx]
+        gx, gy, gtheta = self.waypoints[self.current_waypoint_idx]
 
         # Compute control based on current estimated state
         dx = gx - self.x_est
