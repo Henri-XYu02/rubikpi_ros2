@@ -96,6 +96,15 @@ if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/config")
   )
 endif()
 
+# Install scripts (Python calibration tools)
+if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/scripts")
+  install(PROGRAMS
+    scripts/capture_calibration_images.py
+    scripts/calibrate_camera.py
+    DESTINATION lib/${PROJECT_NAME}
+  )
+endif()
+
 # Testing
 if(BUILD_TESTING)
   find_package(ament_lint_auto REQUIRED)
