@@ -6,6 +6,37 @@ import math
 import os
 from typing import List, Tuple
 
+# ROS TF2 imports
+import tf2_ros
+from tf2_ros import TransformException
+from geometry_msgs.msg import TransformStamped, Quaternion
+
+
+def euler_from_quaternion(quat: Quaternion) -> Tuple[float, float, float]:
+    """
+    Convert a ROS Quaternion message to RPY (roll, pitch, yaw) angles.
+    Yaw is the rotation around the Z-axis.
+    """
+    # Using a simple conversion (can also use tf_transformations library)
+    x = quat.x
+    y = quat.y
+    z = quat.z
+    w = quat.w
+
+    t0 = +2.0 * (w * x + y * z)
+    t1 = +1.0 - 2.0 * (x * x + y * y)
+    roll_x = math.atan2(t0, t1)
+
+    t2 = +2.0 * (w * y - z * x)
+    t2 = +1.0 if t2 > +1.0 else t2
+    t2 = -1.0 if t2 < -1.0 else t2
+    pitch_y = math.asin(t2)
+
+    t3 = +2.0 * (w * z + x * y)
+    t4 = +1.0 - 2.0 * (y * y + z * z)
+    yaw_z = math.atan2(t3, t4)
+
+    return roll_x, pitch_y, yaw_z  # in radians
 
 def normalize_angle(angle: float) -> float:
     while angle > math.pi:
@@ -57,6 +88,11 @@ class WaypointFollowerNode(Node):
         # Publisher for motor commands
         self.cmd_pub = self.create_publisher(Float32MultiArray, 'motor_commands', 10)
 
+        # TF2 Listener
+        # Used to look up transforms (like map -> base_link)
+        self.tf_buffer = tf2_ros.Buffer()
+        self.tf_listener = tf2_ros.TransformListener(self.tf_buffer, self)
+
         # Estimated pose (x, y from integrated v; yaw from integrated angular velocity)
         self.x_est = 0.0
         self.y_est = 0.0
@@ -68,6 +104,51 @@ class WaypointFollowerNode(Node):
         self.timer = self.create_timer(1.0 / self.rate_hz, self.control_step)
 
         self.get_logger().info(f'Loaded {len(self.waypoints)} waypoints. Starting follower at {self.rate_hz:.1f} Hz')
+        self.get_logger().info('Waypoint follower is in CLOSED_LOOP mode (AprilTag only).')
+
+
+    # Pose Correction 
+    def correct_pose_from_tf(self):
+        """
+        Try to get the robot's pose from the TF tree (map -> base_link).
+        If successful, update self.x_est, self.y_est, and self.yaw.
+        This "resets" the dead-reckoning drift.
+        """
+        try:
+            # We want the transform from the fixed 'map' frame to the robot's 'base_link' frame
+            # The timestamp rclpy.time.Time() means "get the latest available transform"
+            t = self.tf_buffer.lookup_transform(
+                'map',          # Target frame
+                'base_link',    # Source frame
+                rclpy.time.Time(),
+                timeout=Duration(seconds=0.1) # Don't wait too long
+            )
+
+            # --- POSE CORRECTION ---
+            # If lookup_transform succeeded, a tag is visible and TF is working
+            old_x, old_y, old_yaw = self.x_est, self.y_est, self.yaw
+            
+            self.x_est = t.transform.translation.x
+            self.y_est = t.transform.translation.y
+            
+            # Convert quaternion to euler angles (Roll, Pitch, Yaw)
+            _roll, _pitch, self.yaw = euler_from_quaternion(t.transform.rotation)
+
+            self.get_logger().info(
+                f'POSE CORRECTION: Drift corrected by TF. '
+                f'Old: ({old_x:.2f}, {old_y:.2f}, {old_yaw:.2f}), '
+                f'New: ({self.x_est:.2f}, {self.y_est:.2f}, {self.yaw:.2f})'
+            )
+            return True
+
+        except TransformException as ex:
+            # This is NOT an error. It just means no tag is visible right now.
+            self.get_logger().warn(
+                f'Could not get pose from TF: {ex}. '
+                'Falling back to dead-reckoning.'
+            )
+            return False
+        
 
     def load_waypoints(self, path: str) -> List[Tuple[float, float, float]]:
         """
@@ -177,13 +258,14 @@ class WaypointFollowerNode(Node):
         """
         Main control loop step.
         1. Compute time delta since last step.
-        2. If all waypoints are completed, stop and return.
-        3. Get current goal waypoint.
-        4. Compute distance and heading error to goal.
-        5. Compute velocity commands using diff2velocity_simple.
-        6. Convert to motor commands and publish.
-        7. Integrate position and orientation estimate using commanded velocities.
-        8. Log current state.
+        2. Try to correct pose from TF.
+        3. If all waypoints are completed, stop and return.
+        4. Get current goal waypoint.
+        5. Compute distance and heading error to goal.
+        6. Compute velocity commands using diff2velocity_simple.
+        7. Convert to motor commands and publish.
+        8. Dead-Reckoning Integration: Integrate position and orientation estimate using commanded velocities.
+        9. Log current state.
         :return: None
         """
         now = self.get_clock().now()
@@ -191,6 +273,10 @@ class WaypointFollowerNode(Node):
         if dt < 0.0001:
             return
         self.last_time = now
+
+        # Try to correct pose 
+        self.correct_pose_from_tf()
+        # Now, self.x_est, self.y_est, self.yaw are the "best" available pose
 
         # Check if all waypoints are completed
         if self.current_waypoint_idx >= len(self.waypoints):
@@ -220,7 +306,7 @@ class WaypointFollowerNode(Node):
         l_norm, r_norm = self.velocity2input(v_cmd, w_cmd)
         self.publish_cmd(l_norm, r_norm)
 
-        # Integrate position and orientation estimate using commanded velocities
+        # Dead-Reckoning Intergration. Integrate position and orientation estimate using commanded velocities
         self.x_est += v_cmd * math.cos(theta) * dt
         self.y_est += v_cmd * math.sin(theta) * dt
         
