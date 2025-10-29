@@ -1,3 +1,4 @@
+#!/usr/bin/env python3
 import rclpy
 from rclpy.node import Node
 from rclpy.duration import Duration
@@ -6,11 +7,12 @@ from apriltag_msgs.msg import AprilTagDetectionArray
 from tf2_ros import Buffer, TransformListener
 import math
 import os
-from typing import List, Tuple, Dict, Optional
-from math import sin, cos, atan2, sqrt
+from typing import List, Tuple
+from math import sin, cos, atan2
 
 
 def normalize_angle(angle: float) -> float:
+    """Normalize angle to [-pi, pi]"""
     while angle > math.pi:
         angle -= 2.0 * math.pi
     while angle < -math.pi:
@@ -18,32 +20,40 @@ def normalize_angle(angle: float) -> float:
     return angle
 
 
-class WaypointFollowerNode(Node):
+class VisionWaypointFollowerNode(Node):
+    """
+    Waypoint follower with AprilTag-based vision correction.
+
+    Operation:
+    - Dead reckoning phase (0.5s): Move using dead reckoning
+    - Correction phase (0.5s): Stop and update pose using AprilTag TF
+
+    TF Chain for localization:
+    odom -> tag_X (static, from tf_publisher)
+    tag_X -> camera_frame (dynamic, from AprilTag detector)
+    camera_frame -> base_link (static, from tf_publisher)
+
+    By looking up odom -> base_link, we get the robot's pose in odom frame.
+    """
+
     def __init__(self):
-        super().__init__('waypoint_follower_node')
+        super().__init__('vision_waypoint_follower_node')
 
         # Parameters
-        # differential drive robot parameters
         self.declare_parameter('waypoints_path', 'waypoints.txt')
-        self.declare_parameter('apriltag_map_path', 'apriltag_map.json')
-        self.declare_parameter('wheel_base', 0.04)  # meters (wheel radius)
-        self.declare_parameter('car_width', 0.168)  # meters (car width)
-        self.declare_parameter('max_speed_mps', 0.68)  # approximate max linear speed
-        self.declare_parameter('max_angular_speed_radps', math.pi * 3 / 2)  # approximate max angular speed
-        self.declare_parameter('max_norm_cmd', 0.5)  # matches motor_controller clamp
-        self.declare_parameter('kv', 0.8)  # linear gain
-        self.declare_parameter('kh', 0.8)  # heading gain
-        self.declare_parameter('pos_tolerance', 0.05)  # meters
-        self.declare_parameter('yaw_tolerance', 0.1)  # radians (~11 degrees)
-        self.declare_parameter('rate_hz', 20.0)
-        
-        # AprilTag parameters
-        self.declare_parameter('use_apriltag_localization', True)
-        self.declare_parameter('apriltag_correction_weight', 0.3)  # fusion weight
-        self.declare_parameter('apriltag_yaw_weight', 0.3)  # yaw fusion weight
+        self.declare_parameter('wheel_base', 0.04)
+        self.declare_parameter('car_width', 0.168)
+        self.declare_parameter('max_speed_mps', 0.68)
+        self.declare_parameter('max_angular_speed_radps', math.pi * 3/2)
+        self.declare_parameter('max_norm_cmd', 0.5)
+        self.declare_parameter('kv', 0.8)
+        self.declare_parameter('kh', 0.8)
+        self.declare_parameter('pos_tolerance', 0.05)
+        self.declare_parameter('yaw_tolerance', 0.1)
+        self.declare_parameter('rate_hz', 10.0)
+        self.declare_parameter('dead_reckoning_duration', 0.5)  # seconds
+        self.declare_parameter('correction_duration', 0.5)  # seconds
         self.declare_parameter('min_detection_confidence', 0.5)
-        self.declare_parameter('max_tag_distance', 2.0)  # meters
-        self.declare_parameter('camera_frame', 'camera_frame')
 
         # Read parameters
         self.wheel_base = float(self.get_parameter('wheel_base').value)
@@ -55,14 +65,9 @@ class WaypointFollowerNode(Node):
         self.pos_tol = float(self.get_parameter('pos_tolerance').value)
         self.yaw_tol = float(self.get_parameter('yaw_tolerance').value)
         self.rate_hz = float(self.get_parameter('rate_hz').value)
-        
-        # AprilTag parameters
-        self.use_apriltag = bool(self.get_parameter('use_apriltag_localization').value)
-        self.apriltag_pos_weight = float(self.get_parameter('apriltag_correction_weight').value)
-        self.apriltag_yaw_weight = float(self.get_parameter('apriltag_yaw_weight').value)
+        self.dead_reckoning_duration = float(self.get_parameter('dead_reckoning_duration').value)
+        self.correction_duration = float(self.get_parameter('correction_duration').value)
         self.min_detection_confidence = float(self.get_parameter('min_detection_confidence').value)
-        self.max_tag_distance = float(self.get_parameter('max_tag_distance').value)
-        self.camera_frame = self.get_parameter('camera_frame').value
 
         self.linear_min = 0.1
         self.angular_min = 0.25
@@ -74,52 +79,54 @@ class WaypointFollowerNode(Node):
             self.get_logger().error(f'No waypoints loaded from {waypoints_path}. Stopping.')
             raise RuntimeError('waypoints_empty')
 
-        # Load AprilTag map
-        self.apriltag_map: Dict[int, Tuple[float, float, float]] = {}
-        if self.use_apriltag:
-            apriltag_map_path = self.get_parameter('apriltag_map_path').value
-            self.apriltag_map = self.load_apriltag_map(apriltag_map_path)
-            self.get_logger().info(f'Loaded {len(self.apriltag_map)} AprilTags from map')
-
         # Publisher for motor commands
         self.cmd_pub = self.create_publisher(Float32MultiArray, 'motor_commands', 10)
 
-        # Subscriber for AprilTag detections
-        if self.use_apriltag:
-            self.apriltag_sub = self.create_subscription(
-                AprilTagDetectionArray,
-                '/detections',
-                self.apriltag_callback,
-                10
-            )
-            
-            # TF2 buffer for looking up tag positions
-            self.tf_buffer = Buffer()
-            self.tf_listener = TransformListener(self.tf_buffer, self)
-            
-            self.detected_tags: List[int] = []
+        # TF2 for AprilTag localization
+        self.tf_buffer = Buffer()
+        self.tf_listener = TransformListener(self.tf_buffer, self)
 
-        # Estimated pose (x, y from integrated v; yaw from integrated angular velocity)
+        # Subscribe to AprilTag detections
+        self.apriltag_sub = self.create_subscription(
+            AprilTagDetectionArray,
+            '/detections',
+            self.apriltag_callback,
+            10
+        )
+
+        # Frame names (must match tf_publisher.py)
+        self.odom_frame = 'odom'
+        self.base_frame = 'base_link'
+
+        # Estimated pose (updated by dead reckoning and AprilTag correction)
         self.x_est = 0.0
         self.y_est = 0.0
         self.yaw = 0.0
+
+        # Detected AprilTags
+        self.detected_tags = []
+
+        # State machine: 'dead_reckoning' or 'correction'
+        self.state = 'dead_reckoning'
+        self.state_start_time = self.get_clock().now()
 
         # Tracking state
         self.current_waypoint_idx = 0
         self.last_time = self.get_clock().now()
         self.timer = self.create_timer(1.0 / self.rate_hz, self.control_step)
 
-        self.get_logger().info(f'Loaded {len(self.waypoints)} waypoints. Starting follower at {self.rate_hz:.1f} Hz')
-        if self.use_apriltag:
-            self.get_logger().info(f'AprilTag localization enabled with {len(self.apriltag_map)} tags')
+        # Statistics
+        self.correction_count = 0
+        self.total_corrections_applied = 0
+
+        self.get_logger().info(f'Loaded {len(self.waypoints)} waypoints.')
+        self.get_logger().info(f'Vision-based follower starting at {self.rate_hz:.1f} Hz')
+        self.get_logger().info(f'Dead reckoning: {self.dead_reckoning_duration}s, Correction: {self.correction_duration}s')
 
     def load_waypoints(self, path: str) -> List[Tuple[float, float, float]]:
         """
         Load waypoints from a text file.
-        Each line in the file should contain three comma-separated values: x, y, theta (in radians).
-        Comments and empty lines are ignored.
-        :param path: Path to the waypoint file.
-        :return: List of waypoints as (x, y, theta) tuples.
+        Each line: x, y, theta (in radians)
         """
         waypoints: List[Tuple[float, float, float]] = []
         try:
@@ -143,218 +150,132 @@ class WaypointFollowerNode(Node):
             self.get_logger().error(f'Failed to load waypoints from {path}: {e}')
         return waypoints
 
-    def load_apriltag_map(self, path: str) -> Dict[int, Tuple[float, float, float]]:
-        """
-        Load AprilTag map from JSON file.
-        Expected format: {"tags": [{"id": 0, "x": 1.0, "y": 2.0, "yaw": 0.0}, ...]}
-        :param path: Path to the AprilTag map file.
-        :return: Dict mapping tag_id to (x, y, yaw).
-        """
-        import json
-        apriltag_map = {}
-        try:
-            if not os.path.isabs(path):
-                cwd_path = os.path.join(os.getcwd(), path)
-                if os.path.exists(cwd_path):
-                    path = cwd_path
-            
-            with open(path, 'r') as f:
-                data = json.load(f)
-                if 'tags' in data:
-                    for tag in data['tags']:
-                        tag_id = int(tag['id'])
-                        x = float(tag['x'])
-                        y = float(tag['y'])
-                        yaw = float(tag.get('yaw', 0.0))
-                        apriltag_map[tag_id] = (x, y, yaw)
-        except Exception as e:
-            self.get_logger().error(f'Failed to load AprilTag map from {path}: {e}')
-        return apriltag_map
-
     def apriltag_callback(self, msg: AprilTagDetectionArray):
         """
         Callback for AprilTag detections.
-        Updates list of currently detected tags.
+        Store which tags are currently visible with sufficient confidence.
         """
         self.detected_tags = []
         for detection in msg.detections:
             tag_id = detection.id
             decision_margin = detection.decision_margin
+
+            # Only use high-confidence detections
             if decision_margin >= self.min_detection_confidence:
                 self.detected_tags.append(tag_id)
 
-    def estimate_yaw_from_apriltag(self) -> Optional[float]:
+        if len(self.detected_tags) > 0:
+            self.get_logger().debug(f'Detected tags: {self.detected_tags}')
+
+    def quaternion_to_yaw(self, qx: float, qy: float, qz: float, qw: float) -> float:
         """
-        Estimate robot yaw using bearing to known tag location.
-        
-        Formula: yaw = expected_bearing - bearing_cam
-        where:
-          - expected_bearing = atan2(tag_y - robot_y, tag_x - robot_x)
-          - bearing_cam = atan2(tag_x_cam, tag_z_cam) in camera frame
-        
-        Returns: estimated_yaw or None if estimation failed
+        Convert quaternion to yaw angle (rotation around Z-axis)
         """
-        if len(self.detected_tags) == 0:
-            return None
-        
-        tag_id = self.detected_tags[0]
-        
-        if tag_id not in self.apriltag_map:
-            return None
-        
-        try:
-            # Get tag position in world frame from map
-            tag_x_world, tag_y_world, _ = self.apriltag_map[tag_id]
-            
-            # Calculate expected bearing (from robot to tag)
-            expected_bearing = atan2(
-                tag_y_world - self.y_est,
-                tag_x_world - self.x_est
-            )
-            
-            # Get tag position in camera frame via TF
-            transform = self.tf_buffer.lookup_transform(
-                self.camera_frame,
-                f'tag_{tag_id}',
-                rclpy.time.Time(),
-                timeout=rclpy.duration.Duration(seconds=0.1)
-            )
-            
-            tag_x_cam = transform.transform.translation.x
-            tag_z_cam = transform.transform.translation.z
-            
-            # Calculate measured bearing in camera frame
-            bearing_cam = atan2(tag_x_cam, tag_z_cam)
-            
-            # Solve for yaw: expected_bearing = yaw + bearing_cam
-            estimated_yaw = expected_bearing - bearing_cam
-            estimated_yaw = normalize_angle(estimated_yaw)
-            
-            self.get_logger().info(
-                f'Yaw estimation: tag_id={tag_id}, expected_bearing={math.degrees(expected_bearing):.1f}°, '
-                f'bearing_cam={math.degrees(bearing_cam):.1f}°, estimated_yaw={math.degrees(estimated_yaw):.1f}°'
-            )
-            
-            return estimated_yaw
-            
-        except Exception as e:
-            self.get_logger().debug(f'Failed to estimate yaw from tag {tag_id}: {e}')
-            return None
+        siny_cosp = 2.0 * (qw * qz + qx * qy)
+        cosy_cosp = 1.0 - 2.0 * (qy * qy + qz * qz)
+        yaw = atan2(siny_cosp, cosy_cosp)
+        return yaw
 
     def apply_apriltag_correction(self):
         """
-        Apply AprilTag-based localization corrections to position and yaw estimates.
-        
-        PROCESS:
-        1. Estimate yaw from bearing (corrects dead reckoning drift)
-        2. Use corrected yaw for position calculation
-        3. Fuse position and yaw with dead reckoning estimates
+        Use AprilTag observations to correct robot pose estimate via TF lookup.
+
+        TF Chain: odom -> tag_X -> camera_frame -> base_link
+
+        By looking up the transform from odom to base_link, we directly get
+        the robot's pose in the odom frame.
+
+        Process:
+        1. For each detected tag, lookup transform: odom -> base_link (via tag)
+        2. Extract robot position (x, y) and orientation (yaw) in odom frame
+        3. Average multiple tag observations if available
+        4. Update robot state estimate
         """
-        if not self.use_apriltag or len(self.detected_tags) == 0:
+        if len(self.detected_tags) == 0:
+            self.get_logger().info('No AprilTags detected. Skipping correction.')
             return
-        
-        # STEP 1: Estimate and update yaw
-        estimated_yaw = self.estimate_yaw_from_apriltag()
-        
-        if estimated_yaw is not None:
-            # Fuse with dead reckoning
-            old_yaw = self.yaw
-            self.yaw = (1 - self.apriltag_yaw_weight) * self.yaw + self.apriltag_yaw_weight * estimated_yaw
-            self.yaw = normalize_angle(self.yaw)
+
+        self.get_logger().info(f'Attempting correction with tags: {self.detected_tags}')
+
+        # Collect pose estimates from each detected tag
+        pose_estimates = []
+
+        for tag_id in self.detected_tags:
+            try:
+                # Look up transform from odom to base_link through the tag
+                # TF chain: odom -> tag_X -> camera_frame -> base_link
+                transform = self.tf_buffer.lookup_transform(
+                    self.odom_frame,
+                    self.base_frame,
+                    rclpy.time.Time(),
+                    timeout=rclpy.duration.Duration(seconds=0.5)
+                )
+
+                # Extract robot position in odom frame
+                robot_x = transform.transform.translation.x
+                robot_y = transform.transform.translation.y
+
+                # Extract robot orientation (yaw) in odom frame
+                qx = transform.transform.rotation.x
+                qy = transform.transform.rotation.y
+                qz = transform.transform.rotation.z
+                qw = transform.transform.rotation.w
+
+                # Convert quaternion to yaw
+                robot_yaw = self.quaternion_to_yaw(qx, qy, qz, qw)
+
+                pose_estimates.append({
+                    'tag_id': tag_id,
+                    'x': robot_x,
+                    'y': robot_y,
+                    'yaw': robot_yaw
+                })
+
+                self.get_logger().info(
+                    f'Tag {tag_id}: Estimated pose = ({robot_x:.3f}, {robot_y:.3f}, {math.degrees(robot_yaw):.1f}°)'
+                )
+
+            except Exception as e:
+                self.get_logger().warn(f'Failed to lookup transform for tag {tag_id}: {e}')
+                continue
+
+        # Update pose estimate using average of all tag observations
+        if len(pose_estimates) > 0:
+            # Simple average (could be weighted by distance or confidence)
+            avg_x = sum(est['x'] for est in pose_estimates) / len(pose_estimates)
+            avg_y = sum(est['y'] for est in pose_estimates) / len(pose_estimates)
+
+            # For yaw, use circular mean (via sin/cos components)
+            avg_yaw_sin = sum(math.sin(est['yaw']) for est in pose_estimates) / len(pose_estimates)
+            avg_yaw_cos = sum(math.cos(est['yaw']) for est in pose_estimates) / len(pose_estimates)
+            avg_yaw = atan2(avg_yaw_sin, avg_yaw_cos)
+
+            # Log the correction
+            old_x, old_y, old_yaw = self.x_est, self.y_est, self.yaw
+
+            # Update pose estimate
+            self.x_est = avg_x
+            self.y_est = avg_y
+            self.yaw = avg_yaw
+
+            self.correction_count += 1
+            self.total_corrections_applied += 1
 
             self.get_logger().info(
-                f'Yaw updated: {math.degrees(old_yaw):.1f}° → {math.degrees(self.yaw):.1f}°'
+                f'CORRECTION #{self.total_corrections_applied}: '
+                f'Pose updated from ({old_x:.3f}, {old_y:.3f}, {math.degrees(old_yaw):.1f}°) '
+                f'to ({self.x_est:.3f}, {self.y_est:.3f}, {math.degrees(self.yaw):.1f}°) '
+                f'using {len(pose_estimates)} tag(s)'
             )
+        else:
+            self.get_logger().warn('No valid pose estimates from AprilTags.')
 
-        # STEP 2: Correct position based on detected tags
-        position_corrections = []
-        
-        for tag_id in self.detected_tags:
-            if tag_id not in self.apriltag_map:
-                continue
-            
-            try:
-                # Get tag position in world frame
-                tag_x_world, tag_y_world, _ = self.apriltag_map[tag_id]
-                
-                # Get tag position in camera frame
-                transform = self.tf_buffer.lookup_transform(
-                    self.camera_frame,
-                    f'tag_{tag_id}',
-                    rclpy.time.Time(),
-                    timeout=rclpy.duration.Duration(seconds=0.1)
-                )
-                
-                tag_x_cam = transform.transform.translation.x
-                tag_y_cam = transform.transform.translation.y
-                tag_z_cam = transform.transform.translation.z
-                
-                # Calculate 2D distance
-                distance_2d = sqrt(tag_x_cam**2 + tag_z_cam**2)
-                distance_3d = sqrt(tag_x_cam**2 + tag_y_cam**2 + tag_z_cam**2)
-                
-                # Filter by distance
-                if distance_3d > self.max_tag_distance:
-                    self.get_logger().debug(f'Tag {tag_id} too far: {distance_3d:.2f}m')
-                    continue
-                
-                # Calculate bearing in camera frame
-                bearing_cam = atan2(tag_x_cam, tag_z_cam)
-                
-                # Convert to global bearing using corrected yaw
-                global_bearing = self.yaw + bearing_cam
-                
-                # Calculate robot position (opposite direction from tag)
-                robot_x_corrected = tag_x_world - distance_2d * cos(global_bearing)
-                robot_y_corrected = tag_y_world - distance_2d * sin(global_bearing)
-                
-                position_corrections.append((robot_x_corrected, robot_y_corrected, distance_2d))
-                
-                self.get_logger().info(
-                    f'Tag {tag_id}: distance={distance_2d:.2f}m, corrected_pos=({robot_x_corrected:.2f}, {robot_y_corrected:.2f})'
-                )
-                
-            except Exception as e:
-                self.get_logger().debug(f'Failed to process tag {tag_id}: {e}')
-                continue
-        
-        # STEP 3: Fuse position corrections with dead reckoning
-        if len(position_corrections) > 0:
-            # Weight by inverse distance (closer tags are more reliable)
-            total_weight = 0.0
-            weighted_x = 0.0
-            weighted_y = 0.0
-            
-            for x, y, dist in position_corrections:
-                weight = 1.0 / max(dist, 0.1)
-                weighted_x += x * weight
-                weighted_y += y * weight
-                total_weight += weight
-            
-            if total_weight > 0:
-                avg_x = weighted_x / total_weight
-                avg_y = weighted_y / total_weight
-                
-                # Fuse with dead reckoning
-                old_x, old_y = self.x_est, self.y_est
-                self.x_est = (1 - self.apriltag_pos_weight) * self.x_est + self.apriltag_pos_weight * avg_x
-                self.y_est = (1 - self.apriltag_pos_weight) * self.y_est + self.apriltag_pos_weight * avg_y
-                
-                self.get_logger().info(
-                    f'Position corrected: ({old_x:.2f}, {old_y:.2f}) → ({self.x_est:.2f}, {self.y_est:.2f})'
-                )
-    
     def diff2velocity_simple(self, dist: float, heading_error: float, gtheta: float, theta: float) -> Tuple[float, float]:
         """
         Simple proportional controller to compute linear and angular velocity commands.
-        :param dist: Distance to the goal waypoint.
-        :param heading_error: Heading error to the goal waypoint.
-        :param gtheta: Goal orientation (not used in this simple controller).
-        :param theta: Current orientation (not used in this simple controller).
-        :return: Tuple of (v_cmd, w_cmd) in m/s and rad/s.
         """
         if dist < self.pos_tol:
-            # Waypoint fully reached - move to next waypoint
+            # Waypoint reached - move to next waypoint
             self.current_waypoint_idx += 1
             self.get_logger().info(f'Reached waypoint {self.current_waypoint_idx}/{len(self.waypoints)}')
             v_cmd, w_cmd = 0.0, 0.0
@@ -365,17 +286,14 @@ class WaypointFollowerNode(Node):
             # Proceed forward with heading correction
             v_cmd = self.max_speed_mps
             w_cmd = math.copysign(self.max_angular_speed_radps * abs(heading_error) / math.pi, heading_error)
-        
+
         v_cmd = v_cmd * self.kv
         w_cmd = w_cmd * self.kh
         return v_cmd, w_cmd
-    
+
     def velocity2input(self, v_cmd: float, w_cmd: float) -> Tuple[float, float]:
         """
         Convert linear and angular velocity commands to normalized motor inputs.
-        :param v_cmd: Desired linear velocity in m/s. 
-        :param w_cmd: Desired angular velocity in rad/s.
-        :return: Tuple of (left_motor_input, right_motor_input) in range [-max_norm_cmd, max_norm_cmd].
         """
         if v_cmd == 0 and w_cmd == 0:
             return 0.0, 0.0
@@ -391,7 +309,7 @@ class WaypointFollowerNode(Node):
             l2 = -1 * r2
             return l2, r2
         else:
-            # Mixture of linear and angular
+            # Mixture of both
             l1, r1 = v_cmd * (0.5 - self.linear_min) / self.max_speed_mps, v_cmd * (0.5 - self.linear_min) / self.max_speed_mps
             l2, r2 = -1 * w_cmd * (0.5 - self.angular_min) / self.max_angular_speed_radps, w_cmd * (0.5 - self.angular_min) / self.max_angular_speed_radps
             l_thres, r_thres = self.linear_min, self.linear_min
@@ -403,22 +321,12 @@ class WaypointFollowerNode(Node):
 
     def control_step(self):
         """
-        Main control loop step.
-        1. Apply AprilTag corrections if available
-        2. Compute time delta since last step
-        3. If all waypoints are completed, stop and return
-        4. Get current goal waypoint
-        5. Compute distance and heading error to goal
-        6. Compute velocity commands using diff2velocity_simple
-        7. Convert to motor commands and publish
-        8. Integrate position and orientation estimate using commanded velocities
-        9. Log current state
-        :return: None
+        Main control loop with state machine.
+
+        States:
+        - 'dead_reckoning': Move for 0.5s using dead reckoning
+        - 'correction': Stop for 0.5s and update pose using AprilTag TF
         """
-        # Apply AprilTag corrections
-        if self.use_apriltag:
-            self.apply_apriltag_correction()
-        
         now = self.get_clock().now()
         dt = (now - self.last_time).nanoseconds / 1e9
         if dt < 0.0001:
@@ -428,46 +336,76 @@ class WaypointFollowerNode(Node):
         # Check if all waypoints are completed
         if self.current_waypoint_idx >= len(self.waypoints):
             self.publish_cmd(0.0, 0.0)
-            self.get_logger().info('All waypoints completed!')
+            self.get_logger().info(
+                f'All waypoints completed! Total corrections applied: {self.total_corrections_applied}'
+            )
             return
 
-        # Desired waypoint
-        gx, gy, gtheta = self.waypoints[self.current_waypoint_idx]
+        # State machine timing
+        time_in_state = (now - self.state_start_time).nanoseconds / 1e9
 
-        # Compute control based on current estimated state
-        dx = gx - self.x_est
-        dy = gy - self.y_est
-        dist = math.hypot(dx, dy)
+        # State transitions
+        if self.state == 'dead_reckoning' and time_in_state >= self.dead_reckoning_duration:
+            # Transition to correction phase
+            self.state = 'correction'
+            self.state_start_time = now
+            self.correction_count = 0
+            self.get_logger().info('=== ENTERING CORRECTION PHASE ===')
+            self.publish_cmd(0.0, 0.0)  # Stop the robot
+            return
 
-        # Use current estimated yaw
-        theta = self.yaw
+        elif self.state == 'correction' and time_in_state >= self.correction_duration:
+            # Transition to dead reckoning phase
+            self.state = 'dead_reckoning'
+            self.state_start_time = now
+            self.get_logger().info('=== ENTERING DEAD RECKONING PHASE ===')
 
-        # Heading to goal
-        path_angle = math.atan2(dy, dx)
-        heading_error = normalize_angle(path_angle - theta)
+        # Execute state-specific behavior
+        if self.state == 'correction':
+            # Stay stopped and apply AprilTag correction once
+            if self.correction_count == 0:
+                self.apply_apriltag_correction()
+                self.correction_count = 1
+            self.publish_cmd(0.0, 0.0)
+            return
 
-        # Linear and angular velocity commands (m/s, rad/s)
-        v_cmd, w_cmd = self.diff2velocity_simple(dist, heading_error, gtheta, theta)
+        elif self.state == 'dead_reckoning':
+            # Normal waypoint following with dead reckoning
+            # Desired waypoint
+            gx, gy, gtheta = self.waypoints[self.current_waypoint_idx]
 
-        # Convert to motor commands and publish
-        l_norm, r_norm = self.velocity2input(v_cmd, w_cmd)
-        self.publish_cmd(l_norm, r_norm)
+            # Compute control based on current estimated state
+            dx = gx - self.x_est
+            dy = gy - self.y_est
+            dist = math.hypot(dx, dy)
 
-        # Integrate position and orientation estimate using commanded velocities
-        self.x_est += v_cmd * math.cos(theta) * dt
-        self.y_est += v_cmd * math.sin(theta) * dt
-        
-        # Integrate yaw using angular velocity
-        self.yaw += w_cmd * dt
-        self.yaw = normalize_angle(self.yaw)
-        
-        self.get_logger().info(
-            f"x: {self.x_est:.2f}, y: {self.y_est:.2f}, yaw: {math.degrees(self.yaw):.1f}°, "
-            f"v_cmd: {v_cmd:.2f}, w_cmd: {w_cmd:.2f}, l_norm: {l_norm:.2f}, r_norm: {r_norm:.2f}, "
-            f"heading_error: {math.degrees(heading_error):.1f}°, dist: {dist:.2f}"
-        )
+            # Use current estimated yaw
+            theta = self.yaw
+
+            # Heading to goal
+            path_angle = math.atan2(dy, dx)
+            heading_error = normalize_angle(path_angle - theta)
+
+            # Linear and angular velocity commands (m/s, rad/s)
+            v_cmd, w_cmd = self.diff2velocity_simple(dist, heading_error, gtheta, theta)
+
+            # Convert to motor commands and publish
+            l_norm, r_norm = self.velocity2input(v_cmd, w_cmd)
+            self.publish_cmd(l_norm, r_norm)
+
+            # Integrate position and orientation estimate using commanded velocities (dead reckoning)
+            self.x_est += v_cmd * math.cos(theta) * dt
+            self.y_est += v_cmd * math.sin(theta) * dt
+            self.yaw += w_cmd * dt
+            self.yaw = normalize_angle(self.yaw)
+
+            self.get_logger().info(
+                f'[DR] x: {self.x_est:.3f}, y: {self.y_est:.3f}, yaw: {math.degrees(self.yaw):.1f}°, '
+                f'v: {v_cmd:.2f}, w: {w_cmd:.2f}, dist: {dist:.3f}m, heading_err: {math.degrees(heading_error):.1f}°'
+            )
 
     def publish_cmd(self, left: float, right: float):
+        """Publish motor commands"""
         msg = Float32MultiArray()
         msg.data = [float(left), float(right)]
         self.cmd_pub.publish(msg)
@@ -475,7 +413,7 @@ class WaypointFollowerNode(Node):
 
 def main(args=None):
     rclpy.init(args=args)
-    node = WaypointFollowerNode()
+    node = VisionWaypointFollowerNode()
     try:
         rclpy.spin(node)
     except KeyboardInterrupt:

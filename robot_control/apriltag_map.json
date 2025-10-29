@@ -3,15 +3,15 @@
     {
       "id": 0,
       "x": 2.0,
-      "y": -0.07,
-      "yaw": 0.0,
+      "y": 0,
+      "yaw": -1.57,
       "description": "First waypoint area, facing forward"
     },
     {
       "id": 1,
-      "x": 1.0,
-      "y": -1.4,
-      "yaw": 1.57,
+      "x": 3.0,
+      "y": 1.1,
+      "yaw": -1.57,
       "description": "Corner position, facing left (90 degrees)"
     }
   ],

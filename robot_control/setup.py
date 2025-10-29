@@ -33,6 +33,7 @@ setup(
             'velocity_control = robot_control.velocity_control:main',
             'waypoint_follower = robot_control.waypoint_follower:main',
             'vision_waypoint_follower = robot_control.vision_waypoint_follower:main',
+            'tf_publisher = robot_control.tf_publisher:main',
         ],
     },
 )
