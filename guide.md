@@ -8,10 +8,11 @@ ros2 run apriltag_ros apriltag_node --ros-args \
 ros2 launch apriltag_ros apriltag_launch.py
 
 ros2 run hw_1_solution hw1_closedloop
-ros2 run hw_1_solution velocity_mapping
 
-or
+ros2 run hw_1_solution velocity_mapping
 
 ros2 run robot_control vision_waypoint_follower
 
 ros2 run hw_1_solution motor_control
+
+ros2 launch robot_control waypoint_follow_launch.py
