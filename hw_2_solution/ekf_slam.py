@@ -83,7 +83,6 @@ class EKFSLAMNode(Node):
         
         # Publishers
         self.cmd_vel_pub = self.create_publisher(Twist, '/cmd_vel', 10)
-        self.map_pub = self.create_publisher(MarkerArray, '/landmark_map', 10)
         
         # TF
         self.tf_buffer = Buffer()
@@ -108,9 +107,9 @@ class EKFSLAMNode(Node):
         # Waypoints
         self.waypoints = np.array([
             [0.0, 0.0, 0.0], 
-            [1.0, 0.0, 0.0],
-            [1.0, 2.0, np.pi],
-            [0.0, 0.0, 0.0]
+            [1.0, 0.0, np.pi/2],
+            [1.0, 1.0, np.pi],
+            [0.0, 1.0, -np.pi/2]
         ])
         
         # Navigation state
@@ -588,9 +587,9 @@ class EKFSLAMNode(Node):
         """
         tf_observations = []
         current_time = rclpy.time.Time()  # Get latest available transform
-        
-        # Try to detect tags 0-19 (adjust range based on your setup)
-        for tag_id in range(20):
+
+        # Try to detect tags 0-9 (adjust range based on your setup)
+        for tag_id in range(10):
             try:
                 # Look up transform from base_link to tag_{tag_id}
                 transform = self.tf_buffer.lookup_transform(
@@ -668,8 +667,7 @@ class EKFSLAMNode(Node):
         # Get TF observations
         tf_observations = self.get_tf_observations()
         
-        # Create control input from last command
-        # (In real scenario, you might get this from wheel encoders)
+        # Control input from last command
         if hasattr(self, 'last_linear_vel') and hasattr(self, 'last_angular_vel'):
             u = np.array([[self.last_linear_vel], [self.last_angular_vel]])
         else:
@@ -680,9 +678,6 @@ class EKFSLAMNode(Node):
         
         # Broadcast TF
         self.broadcast_tf()
-        
-        # Publish map
-        self.publish_map()
         
         # Navigation logic
         if self.current_waypoint_idx >= len(self.waypoints):
@@ -792,92 +787,7 @@ class EKFSLAMNode(Node):
         qz = cr * cp * sy - sr * sp * cy
         
         return qx, qy, qz, qw
-    
-    def publish_map(self):
-        """Publish landmark map as MarkerArray"""
-        marker_array = MarkerArray()
-        
-        n_landmarks = (len(self.xEst) - 4) // 2
-        
-        for i in range(n_landmarks):
-            lm_id = 4 + i * 2
-            tag_id = self.landmark_tags[i]
-            
-            # Landmark position marker
-            marker = Marker()
-            marker.header.frame_id = 'odom'
-            marker.header.stamp = self.get_clock().now().to_msg()
-            marker.ns = 'landmarks'
-            marker.id = tag_id
-            marker.type = Marker.CYLINDER
-            marker.action = Marker.ADD
-            
-            marker.pose.position.x = float(self.xEst[lm_id, 0])
-            marker.pose.position.y = float(self.xEst[lm_id + 1, 0])
-            marker.pose.position.z = 0.5
-            
-            marker.pose.orientation.w = 1.0
-            
-            marker.scale.x = 0.3
-            marker.scale.y = 0.3
-            marker.scale.z = 1.0
-            
-            marker.color.a = 1.0
-            marker.color.r = 0.0
-            marker.color.g = 1.0
-            marker.color.b = 0.0
-            
-            marker_array.markers.append(marker)
-            
-            # Text label
-            text_marker = Marker()
-            text_marker.header = marker.header
-            text_marker.ns = 'landmark_labels'
-            text_marker.id = tag_id + 1000
-            text_marker.type = Marker.TEXT_VIEW_FACING
-            text_marker.action = Marker.ADD
-            
-            text_marker.pose.position.x = float(self.xEst[lm_id, 0])
-            text_marker.pose.position.y = float(self.xEst[lm_id + 1, 0])
-            text_marker.pose.position.z = 1.5
-            
-            text_marker.text = f'tag_{tag_id}'
-            text_marker.scale.z = 0.3
-            
-            text_marker.color.a = 1.0
-            text_marker.color.r = 1.0
-            text_marker.color.g = 1.0
-            text_marker.color.b = 1.0
-            
-            marker_array.markers.append(text_marker)
-            
-            # Uncertainty ellipse marker
-            cov_marker = Marker()
-            cov_marker.header = marker.header
-            cov_marker.ns = 'uncertainty'
-            cov_marker.id = tag_id + 2000
-            cov_marker.type = Marker.CYLINDER
-            cov_marker.action = Marker.ADD
-            
-            cov_marker.pose.position.x = float(self.xEst[lm_id, 0])
-            cov_marker.pose.position.y = float(self.xEst[lm_id + 1, 0])
-            cov_marker.pose.position.z = 0.01
-            
-            # Size based on covariance
-            std_x = math.sqrt(self.PEst[lm_id, lm_id])
-            std_y = math.sqrt(self.PEst[lm_id + 1, lm_id + 1])
-            cov_marker.scale.x = 2.0 * std_x
-            cov_marker.scale.y = 2.0 * std_y
-            cov_marker.scale.z = 0.02
-            
-            cov_marker.color.a = 0.3
-            cov_marker.color.r = 1.0
-            cov_marker.color.g = 1.0
-            cov_marker.color.b = 0.0
-            
-            marker_array.markers.append(cov_marker)
-        
-        self.map_pub.publish(marker_array)
+
     
     def stop_robot(self):
         """Stop the robot"""
