@@ -11,6 +11,11 @@ from scipy.spatial.transform import Rotation
 
 """
 EKF-SLAM implementation for landmark mapping while navigating waypoints
+
+State vector (without velocity):
+x = [x_robot, y_robot, yaw_robot, x_lm1, y_lm1, x_lm2, y_lm2, ...]
+Robot state: 3 dimensions [x, y, yaw]
+Each landmark: 2 dimensions [x, y]
 """
 
 class PIDcontroller:
@@ -78,33 +83,57 @@ class PIDcontroller:
 
 
 class EKFSLAMNode(Node):
+    """
+    EKF-SLAM Node for simultaneous localization and mapping using AprilTags.
+    
+    State Representation (without velocity):
+    - Robot state: [x, y, yaw] (3 dimensions)
+    - Each landmark: [x, y] (2 dimensions)
+    - Full state: [x_r, y_r, yaw_r, x_lm1, y_lm1, ..., x_lmN, y_lmN]
+    
+    EKF maintains:
+    - xEst: State estimate vector (mean)
+    - PEst: Covariance matrix (uncertainty)
+    """
+    
     def __init__(self):
+        """
+        Initialize EKF-SLAM node with state, covariance, and ROS interfaces.
+        """
         super().__init__('ekf_slam_node')
         
         # Publishers
         self.cmd_vel_pub = self.create_publisher(Twist, '/cmd_vel', 10)
         
-        # TF
+        # TF (Transform) interfaces for coordinate frame management
         self.tf_buffer = Buffer()
         self.tf_listener = TransformListener(self.tf_buffer, self)
         self.tf_broadcaster = TransformBroadcaster(self)
         
-        self.odom_frame = 'odom'
-        self.base_frame = 'base_link'
+        # Coordinate frames
+        self.odom_frame = 'odom'  # Global reference frame
+        self.base_frame = 'base_link'  # Robot's local frame
         
-        # EKF-SLAM State
-        # State: [x_robot, y_robot, yaw_robot, v_robot, x_lm1, y_lm1, x_lm2, y_lm2, ...]
-        self.xEst = np.zeros((4, 1))  # Start with just robot state
-        self.PEst = np.eye(4) * 0.1   # Initial covariance
+        # EKF-SLAM State (3D robot state: x, y, yaw)
+        # State vector: x = [x_robot, y_robot, yaw_robot, x_lm1, y_lm1, ...]
+        self.xEst = np.zeros((3, 1))  # Initial state: robot at origin with zero yaw
+        self.PEst = np.eye(3) * 0.1   # Initial covariance (low uncertainty)
         
-        # Map: landmark_index -> tag_id
+        # Landmark database: maps landmark_index -> tag_id
+        # This allows us to associate tag observations with state vector entries
         self.landmark_tags = {}
         
-        # Process and measurement noise matrices
-        self.Q = np.diag([0.1, 0.1, np.deg2rad(5.0), 0.5]) ** 2  # Process noise
-        self.R_tf = np.diag([0.08, 0.08]) ** 2  # TF measurement noise (x, y in meters)
+        # Process noise covariance Q (uncertainty in motion model)
+        # Q represents how much we trust our motion model
+        # Diagonal matrix: [σ_x², σ_y², σ_yaw²]
+        self.Q = np.diag([0.1, 0.1, np.deg2rad(5.0)]) ** 2
         
-        # Waypoints
+        # Measurement noise covariance R (uncertainty in sensor)
+        # R represents how much we trust our sensor measurements
+        # For TF observations: [σ_dx², σ_dy²]
+        self.R_tf = np.diag([0.08, 0.08]) ** 2
+        
+        # Navigation waypoints [x, y, yaw]
         self.waypoints = np.array([
             [0.0, 0.0, 0.0], 
             [1.0, 0.0, np.pi/2],
@@ -112,21 +141,21 @@ class EKFSLAMNode(Node):
             [0.0, 1.0, -np.pi/2]
         ])
         
-        # Navigation state
+        # Navigation state variables
         self.pid = PIDcontroller(0.8, 0.01, 0.005)
         self.current_waypoint_idx = 0
         self.waypoint_reached = False
-        self.tolerance = 0.15
-        self.angle_tolerance = 0.1
+        self.tolerance = 0.15  # Position tolerance (meters)
+        self.angle_tolerance = 0.1  # Orientation tolerance (radians)
         self.drive_backwards = False
-        self.stage = 'rotate_to_goal'
-        self.fixed_rotation_vel = 0.785
+        self.stage = 'rotate_to_goal'  # Navigation state machine
+        self.fixed_rotation_vel = 0.785  # Fixed angular velocity for pure rotation
         
-        # Timers
-        self.dt = 0.1
+        # Control loop timing
+        self.dt = 0.1  # Time step (seconds)
         self.control_timer = self.create_timer(self.dt, self.control_loop)
         
-        self.get_logger().info('EKF-SLAM Node initialized')
+        self.get_logger().info('EKF-SLAM Node initialized (3D state: x, y, yaw)')
         
     # ==================== EKF-SLAM Functions ====================
     
@@ -134,11 +163,10 @@ class EKFSLAMNode(Node):
         """
         SLAM motion model: predicts next state given current state and control.
         
-        Motion Model Equations (discrete-time):
+        Motion Model Equations (discrete-time, without velocity in state):
         x_{t+1} = x_t + v*dt*cos(yaw)
         y_{t+1} = y_t + v*dt*sin(yaw)
         yaw_{t+1} = yaw_t + ω*dt
-        v_{t+1} = v_t
         landmarks remain static: x_lm_{t+1} = x_lm_t
         
         In matrix form: x_{t+1} = F*x_t + B*u
@@ -146,7 +174,8 @@ class EKFSLAMNode(Node):
         Parameters:
         -----------
         x : np.array (n, 1)
-            Current state vector [x_r, y_r, yaw, v, x_lm1, y_lm1, ...]
+            Current state vector [x_r, y_r, yaw, x_lm1, y_lm1, ...]
+            Robot state is now only 3D (no velocity)
         u : np.array (2, 1)
             Control input [v, ω] (linear velocity, angular velocity)
             
@@ -157,25 +186,18 @@ class EKFSLAMNode(Node):
         """
         n = len(x)
         
-        # State transition matrix F (landmarks don't move, so F is mostly identity)
+        # State transition matrix F (landmarks don't move, so F is identity)
         F_slam = np.eye(n)
-        
-        # Robot state transition (velocity model)
-        F_slam[0:4, 0:4] = np.array([
-            [1.0, 0, 0, 0],  # x doesn't depend on other states directly
-            [0, 1.0, 0, 0],  # y doesn't depend on other states directly
-            [0, 0, 1.0, 0],  # yaw doesn't depend on other states directly
-            [0, 0, 0, 0]     # velocity is replaced by control input
-        ])
         
         # Control input matrix B (only affects robot state, not landmarks)
         B_slam = np.zeros((n, 2))
         yaw = x[2, 0]
-        B_slam[0:4, 0:2] = np.array([
+        
+        # Robot state is at indices 0, 1, 2 (x, y, yaw)
+        B_slam[0:3, 0:2] = np.array([
             [self.dt * math.cos(yaw), 0],  # x position change from linear velocity
             [self.dt * math.sin(yaw), 0],  # y position change from linear velocity
-            [0.0, self.dt],                # yaw change from angular velocity
-            [1.0, 0.0]                     # velocity becomes the control input
+            [0.0, self.dt]                 # yaw change from angular velocity
         ])
         
         # Apply motion model: x_new = F*x + B*u
@@ -193,11 +215,19 @@ class EKFSLAMNode(Node):
         The Jacobian F_j = ∂f/∂x represents how small changes in state affect
         the predicted state. Used in EKF predict step: P_pred = F_j*P*F_j^T + Q
         
-        Partial derivatives:
+        Partial derivatives (for 3D robot state):
+        ∂x/∂x = 1
+        ∂x/∂y = 0
         ∂x/∂yaw = -v*dt*sin(yaw)
-        ∂x/∂v = dt*cos(yaw)
+        
+        ∂y/∂x = 0
+        ∂y/∂y = 1
         ∂y/∂yaw = v*dt*cos(yaw)
-        ∂y/∂v = dt*sin(yaw)
+        
+        ∂yaw/∂x = 0
+        ∂yaw/∂y = 0
+        ∂yaw/∂yaw = 1
+        
         All landmark derivatives are 0 (landmarks don't move)
         
         Parameters:
@@ -219,11 +249,14 @@ class EKFSLAMNode(Node):
         yaw = x[2, 0]
         v = u[0, 0]
         
-        jF[0:4, 0:4] = np.array([
-            [1.0, 0.0, -self.dt * v * math.sin(yaw), self.dt * math.cos(yaw)],
-            [0.0, 1.0, self.dt * v * math.cos(yaw), self.dt * math.sin(yaw)],
-            [0.0, 0.0, 1.0, 0.0],
-            [0.0, 0.0, 0.0, 1.0]
+        # Robot state Jacobian (3x3 block)
+        jF[0:3, 0:3] = np.array([
+            # [∂x/∂x, ∂x/∂y, ∂x/∂yaw]
+            [1.0, 0.0, -self.dt * v * math.sin(yaw)],
+            # [∂y/∂x, ∂y/∂y, ∂y/∂yaw]
+            [0.0, 1.0, self.dt * v * math.cos(yaw)],
+            # [∂yaw/∂x, ∂yaw/∂y, ∂yaw/∂yaw]
+            [0.0, 0.0, 1.0]
         ])
         
         return jF
@@ -257,8 +290,8 @@ class EKFSLAMNode(Node):
         z : np.array (2, 1)
             Predicted measurement [dx_local, dy_local]
         """
-        # Calculate index in state vector: robot has 4 states, each landmark has 2
-        lm_id = 4 + landmark_id * 2
+        # Calculate index in state vector: robot has 3 states, each landmark has 2
+        lm_id = 3 + landmark_id * 2
         
         # Extract robot pose
         x_robot = x[0, 0]
@@ -293,7 +326,7 @@ class EKFSLAMNode(Node):
         
         For TF observation model h(x) = [dx_local, dy_local]:
         
-        Derivatives w.r.t robot pose:
+        Derivatives w.r.t robot pose (3D state):
         ∂(dx_local)/∂x_r = -cos(-yaw)
         ∂(dx_local)/∂y_r = -sin(-yaw)
         ∂(dx_local)/∂yaw = -dx_global*sin(-yaw) + dy_global*cos(-yaw)
@@ -321,7 +354,7 @@ class EKFSLAMNode(Node):
             Jacobian matrix of observation model
             Only non-zero for robot pose and this landmark's position
         """
-        lm_id = 4 + landmark_id * 2
+        lm_id = 3 + landmark_id * 2
         
         x_robot = x[0, 0]
         y_robot = x[1, 0]
@@ -341,6 +374,7 @@ class EKFSLAMNode(Node):
         
         # dx_local = dx_global * cos(-yaw) - dy_global * sin(-yaw)
         # dy_local = dx_global * sin(-yaw) + dy_global * cos(-yaw)
+        
         # Derivatives w.r.t robot position (columns 0, 1, 2)
         jH[0, 0] = -cos_yaw  # ∂(dx_local)/∂x_robot
         jH[0, 1] = -sin_yaw  # ∂(dx_local)/∂y_robot
@@ -401,7 +435,7 @@ class EKFSLAMNode(Node):
         This is called when a landmark is observed for the first time.
         The state vector and covariance matrix are expanded:
         
-        Old state: [x_r, y_r, yaw, v, x_lm1, y_lm1, ..., x_lmN, y_lmN]
+        Old state: [x_r, y_r, yaw, x_lm1, y_lm1, ..., x_lmN, y_lmN]
         New state: [..., x_lmN, y_lmN, x_lm(N+1), y_lm(N+1)]
         
         Old covariance: P (m×m)
@@ -501,7 +535,7 @@ class EKFSLAMNode(Node):
             - H = ∂h/∂x                   # Compute Jacobian
             - S = H*P_pred*H^T + R        # Innovation covariance
             - K = P_pred*H^T*S^(-1)       # Kalman gain
-            - x_est = x_pred + K*y        # Update state
+            - x_est = x_pred + K*y        # Update state (including robot pose!)
             - P_est = (I - K*H)*P_pred    # Update covariance
         
         Parameters:
@@ -521,7 +555,7 @@ class EKFSLAMNode(Node):
         # Build process noise matrix Q (only robot state has process noise)
         n = len(self.xEst)
         Q_slam = np.zeros((n, n))
-        Q_slam[0:4, 0:4] = self.Q  # Process noise only for robot
+        Q_slam[0:3, 0:3] = self.Q  # Process noise only for robot (3x3)
         
         # Predict covariance: P_pred = F*P*F^T + Q
         PPred = jF @ self.PEst @ jF.T + Q_slam
@@ -535,7 +569,7 @@ class EKFSLAMNode(Node):
             if lm_idx == -1:
                 # NEW LANDMARK: Initialize and add to state
                 xPred, PPred = self.add_new_landmark_tf(xPred, PPred, tf_obs, tag_id)
-                new_lm_idx = (len(xPred) - 4) // 2 - 1
+                new_lm_idx = (len(xPred) - 3) // 2 - 1
                 self.landmark_tags[new_lm_idx] = tag_id
             else:
                 # KNOWN LANDMARK: Perform EKF update
@@ -554,9 +588,11 @@ class EKFSLAMNode(Node):
                 
                 # Kalman gain: K = P*H^T*S^(-1)
                 # K determines how much to trust the measurement vs. prediction
+                # K affects ENTIRE state, including robot pose!
                 K = PPred @ jH.T @ np.linalg.inv(S)
                 
                 # Update state estimate: x_new = x_pred + K*y
+                # This updates robot x, y, yaw AND landmark positions
                 xPred = xPred + K @ y
                 
                 # Normalize yaw angle to [-π, π]
@@ -613,7 +649,7 @@ class EKFSLAMNode(Node):
                 
                 # Calculate 3D distance for range filtering
                 dist = math.sqrt(dx**2 + dy**2 + dz**2)
-                SENSOR_RANGE = 5.0  # Maximum detection range (meters)
+                SENSOR_RANGE = 2.0  # Maximum detection range (meters)
                 
                 if dist < SENSOR_RANGE:
                     # Create observation: [dx, dy] in robot's local frame
@@ -629,25 +665,61 @@ class EKFSLAMNode(Node):
     # ==================== Navigation Functions ====================
     
     def get_current_pose(self):
-        """Get current robot pose from EKF estimate"""
+        """
+        Extract current robot pose from EKF state estimate.
+        
+        Returns:
+        --------
+        pose : np.array [x, y, yaw]
+            Robot pose in global (odom) frame
+        """
         return np.array([
-            self.xEst[0, 0],  # x
-            self.xEst[1, 0],  # y
-            self.xEst[2, 0]   # yaw
+            self.xEst[0, 0],  # x position
+            self.xEst[1, 0],  # y position
+            self.xEst[2, 0]   # yaw orientation
         ])
     
     def should_drive_backwards(self, current_wp):
-        """Determine if robot should drive backwards"""
-        return False  # Keep it simple - always drive forward
+        """
+        Determine optimal driving direction (forward or backward).
+        
+        For simplicity, always drive forward. Could be extended to compare
+        total rotation needed for forward vs. backward approach.
+        
+        Parameters:
+        -----------
+        current_wp : np.array [x, y, yaw]
+            Target waypoint
+            
+        Returns:
+        --------
+        bool : True if should drive backwards, False for forward
+        """
+        return False
     
     def get_desired_heading_to_goal(self, current_wp, drive_backwards):
-        """Get the desired heading to face towards the goal"""
+        """
+        Calculate desired heading to face toward (or away from) goal.
+        
+        Parameters:
+        -----------
+        current_wp : np.array [x, y, yaw]
+            Target waypoint
+        drive_backwards : bool
+            Whether driving backwards
+            
+        Returns:
+        --------
+        desired_heading : float
+            Target heading angle in radians (wrapped to [-π, π])
+        """
         current_pose = self.get_current_pose()
         delta_x = current_wp[0] - current_pose[0]
         delta_y = current_wp[1] - current_pose[1]
         angle_to_target = np.arctan2(delta_y, delta_x)
         
         if drive_backwards:
+            # Face away from target (add π)
             desired_heading = angle_to_target + np.pi
             desired_heading = (desired_heading + np.pi) % (2 * np.pi) - np.pi
         else:
@@ -656,30 +728,60 @@ class EKFSLAMNode(Node):
         return desired_heading
     
     def get_rotation_direction(self, heading_error):
-        """Determine rotation direction"""
+        """
+        Determine angular velocity direction for pure rotation.
+        
+        Parameters:
+        -----------
+        heading_error : float
+            Difference between desired and current heading (radians)
+            Positive = need to rotate CCW, Negative = rotate CW
+            
+        Returns:
+        --------
+        angular_velocity : float
+            Fixed magnitude, sign indicates direction
+        """
         if heading_error > 0:
-            return self.fixed_rotation_vel
+            return self.fixed_rotation_vel  # Counter-clockwise
         else:
-            return -self.fixed_rotation_vel
+            return -self.fixed_rotation_vel  # Clockwise
     
     def control_loop(self):
-        """Main control loop with EKF-SLAM"""
-        # Get TF observations
+        """
+        Main control loop: EKF-SLAM update + waypoint navigation.
+        
+        Control Flow:
+        1. Get TF observations of landmarks
+        2. Run EKF-SLAM update (predict + update)
+        3. Broadcast updated robot pose as TF
+        4. Execute waypoint navigation (three-stage controller)
+        
+        Three-Stage Navigation:
+        - Stage 1 (rotate_to_goal): Rotate to face goal direction
+        - Stage 2 (drive): Drive toward goal with heading correction
+        - Stage 3 (rotate_to_orient): Rotate to final orientation
+        """
+        # ===== EKF-SLAM UPDATE =====
+        
+        # Get landmark observations from TF tree
         tf_observations = self.get_tf_observations()
         
-        # Control input from last command
+        # Create control input from last command (for prediction step)
         if hasattr(self, 'last_linear_vel') and hasattr(self, 'last_angular_vel'):
             u = np.array([[self.last_linear_vel], [self.last_angular_vel]])
         else:
             u = np.array([[0.0], [0.0]])
         
-        # EKF-SLAM update
+        # Run EKF-SLAM algorithm
         self.ekf_slam_update(u, tf_observations)
         
-        # Broadcast TF
+        # Publish updated pose
         self.broadcast_tf()
         
-        # Navigation logic
+        # ===== WAYPOINT NAVIGATION =====
+        
+        # Check if all waypoints completed
         if self.current_waypoint_idx >= len(self.waypoints):
             self.get_logger().info('All waypoints reached!')
             self.stop_robot()
@@ -688,33 +790,36 @@ class EKFSLAMNode(Node):
         current_wp = self.waypoints[self.current_waypoint_idx]
         current_pose = self.get_current_pose()
         
+        # Initialize for new waypoint
         if not self.waypoint_reached:
             self.pid.setTarget(current_wp)
             self.drive_backwards = self.should_drive_backwards(current_wp)
             self.waypoint_reached = True
             self.stage = 'rotate_to_goal'
 
+        # Calculate position error
         delta_x = current_wp[0] - current_pose[0]
         delta_y = current_wp[1] - current_pose[1]
         position_error = np.sqrt(delta_x**2 + delta_y**2)
         
         twist_msg = Twist()
         
-        # Stage 1: Rotate to face the goal
+        # STAGE 1: Rotate to face the goal
         if self.stage == 'rotate_to_goal':
             desired_heading = self.get_desired_heading_to_goal(current_wp, self.drive_backwards)
             heading_error = desired_heading - current_pose[2]
             heading_error = (heading_error + np.pi) % (2 * np.pi) - np.pi
             
-            if abs(heading_error) < 0.05:
+            if abs(heading_error) < 0.05:  # Aligned with goal
                 self.stage = 'drive'
                 twist_msg.angular.z = 0.0
             else:
+                # Pure rotation at fixed velocity
                 twist_msg.angular.z = float(self.get_rotation_direction(heading_error))
         
-        # Stage 2: Drive towards the goal
+        # STAGE 2: Drive towards the goal
         elif self.stage == 'drive':
-            if position_error < self.tolerance:
+            if position_error < self.tolerance:  # Reached position
                 self.stage = 'rotate_to_orient'
                 twist_msg.linear.x = 0.0
             else:
@@ -722,47 +827,56 @@ class EKFSLAMNode(Node):
                 heading_error = desired_heading - current_pose[2]
                 heading_error = (heading_error + np.pi) % (2 * np.pi) - np.pi
                 
-                if abs(heading_error) > 0.2:
+                if abs(heading_error) > 0.2:  # Heading drift too large
                     self.stage = 'rotate_to_goal'
                     twist_msg.linear.x = 0.0
                 else:
+                    # PID control for smooth driving with heading correction
                     update_value = self.pid.update(current_pose, self.drive_backwards)
                     twist_msg.linear.x = float(update_value[0])
                     twist_msg.angular.z = float(update_value[1])
         
-        # Stage 3: Rotate to target orientation
+        # STAGE 3: Rotate to target orientation
         elif self.stage == 'rotate_to_orient':
             heading_error = current_wp[2] - current_pose[2]
             heading_error = (heading_error + np.pi) % (2 * np.pi) - np.pi
             
-            if abs(heading_error) < self.angle_tolerance:
+            if abs(heading_error) < self.angle_tolerance:  # Final orientation achieved
                 self.current_waypoint_idx += 1
                 self.waypoint_reached = False
                 twist_msg.angular.z = 0.0
                 self.get_logger().info(f'Reached waypoint {self.current_waypoint_idx}')
             else:
+                # Pure rotation at fixed velocity
                 twist_msg.angular.z = float(self.get_rotation_direction(heading_error))
         
-        # Store velocities for next EKF prediction
+        # Store velocities for next EKF prediction step
         self.last_linear_vel = twist_msg.linear.x
         self.last_angular_vel = twist_msg.angular.z
         
-        # Publish control command
+        # Publish velocity command to robot
         self.cmd_vel_pub.publish(twist_msg)
     
     def broadcast_tf(self):
-        """Broadcast TF transform from odom to base_link"""
+        """
+        Broadcast TF transform from odom to base_link.
+        
+        Publishes the estimated robot pose as a TF transform, allowing
+        other nodes to transform between coordinate frames.
+        """
         current_time = self.get_clock().now()
         
         t = TransformStamped()
         t.header.stamp = current_time.to_msg()
-        t.header.frame_id = self.odom_frame
-        t.child_frame_id = self.base_frame
+        t.header.frame_id = self.odom_frame  # Parent frame
+        t.child_frame_id = self.base_frame   # Child frame
         
+        # Set translation (position)
         t.transform.translation.x = float(self.xEst[0, 0])
         t.transform.translation.y = float(self.xEst[1, 0])
-        t.transform.translation.z = 0.0
+        t.transform.translation.z = 0.0  # 2D navigation
         
+        # Set rotation (orientation as quaternion)
         yaw = float(self.xEst[2, 0])
         qx, qy, qz, qw = self.euler_to_quaternion(0, 0, yaw)
         t.transform.rotation.x = qx
@@ -770,10 +884,25 @@ class EKFSLAMNode(Node):
         t.transform.rotation.z = qz
         t.transform.rotation.w = qw
         
+        # Broadcast transform
         self.tf_broadcaster.sendTransform(t)
     
     def euler_to_quaternion(self, roll, pitch, yaw):
-        """Convert Euler angles to quaternion"""
+        """
+        Convert Euler angles (roll, pitch, yaw) to quaternion (x, y, z, w).
+        
+        For 2D navigation, roll=0 and pitch=0, only yaw is used.
+        
+        Parameters:
+        -----------
+        roll, pitch, yaw : float
+            Euler angles in radians
+            
+        Returns:
+        --------
+        qx, qy, qz, qw : float
+            Quaternion components
+        """
         cy = math.cos(yaw * 0.5)
         sy = math.sin(yaw * 0.5)
         cp = math.cos(pitch * 0.5)
@@ -790,16 +919,19 @@ class EKFSLAMNode(Node):
 
     
     def stop_robot(self):
-        """Stop the robot"""
+        """
+        Stop the robot by publishing zero velocities.
+        Also logs the final landmark map.
+        """
         twist_msg = Twist()
         self.cmd_vel_pub.publish(twist_msg)
         
         # Log final map
         self.get_logger().info('='*50)
         self.get_logger().info('Final Landmark Map:')
-        n_landmarks = (len(self.xEst) - 4) // 2
+        n_landmarks = (len(self.xEst) - 3) // 2  # Robot state is 3D now
         for i in range(n_landmarks):
-            lm_id = 4 + i * 2
+            lm_id = 3 + i * 2  # Landmarks start at index 3
             tag_id = self.landmark_tags[i]
             x = self.xEst[lm_id, 0]
             y = self.xEst[lm_id + 1, 0]
