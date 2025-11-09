@@ -8,6 +8,7 @@ from visualization_msgs.msg import Marker, MarkerArray
 import numpy as np
 import math
 from scipy.spatial.transform import Rotation
+import time
 
 """
 EKF-SLAM implementation for landmark mapping while navigating waypoints
@@ -117,7 +118,7 @@ class EKFSLAMNode(Node):
         # EKF-SLAM State (3D robot state: x, y, yaw)
         # State vector: x = [x_robot, y_robot, yaw_robot, x_lm1, y_lm1, ...]
         self.xEst = np.zeros((3, 1))  # Initial state: robot at origin with zero yaw
-        self.PEst = np.eye(3) * 0.1   # Initial covariance (low uncertainty)
+        self.PEst = np.eye(3) * 0.05   # Initial covariance (low uncertainty)
         
         # Landmark database: maps landmark_index -> tag_id
         # This allows us to associate tag observations with state vector entries
@@ -126,20 +127,25 @@ class EKFSLAMNode(Node):
         # Process noise covariance Q (uncertainty in motion model)
         # Q represents how much we trust our motion model
         # Diagonal matrix: [σ_x², σ_y², σ_yaw²]
-        self.Q = np.diag([0.1, 0.1, np.deg2rad(5.0)]) ** 2
+        self.Q = np.diag([0.15, 0.15, np.deg2rad(10.0)]) ** 2
         
         # Measurement noise covariance R (uncertainty in sensor)
         # R represents how much we trust our sensor measurements
         # For TF observations: [σ_dx², σ_dy²]
-        self.R_tf = np.diag([0.08, 0.08]) ** 2
+        self.R_tf = np.diag([0.2, 0.2]) ** 2
         
         # Navigation waypoints [x, y, yaw]
         self.waypoints = np.array([
             [0.0, 0.0, 0.0], 
             [1.0, 0.0, np.pi/2],
             [1.0, 1.0, np.pi],
-            [0.0, 1.0, -np.pi/2]
+            [0.0, 1.0, -np.pi/2],
+            [0.0, 0.0, 0.0],
         ])
+        # self.waypoints = np.array([
+        #     [0.0, 0.0, 0.0], 
+        #     [1.0, 0.0, 0],
+        # ])
         
         # Navigation state variables
         self.pid = PIDcontroller(0.8, 0.01, 0.005)
@@ -150,6 +156,8 @@ class EKFSLAMNode(Node):
         self.drive_backwards = False
         self.stage = 'rotate_to_goal'  # Navigation state machine
         self.fixed_rotation_vel = 0.785  # Fixed angular velocity for pure rotation
+        
+        self.last_tag_detection_time = 0.0
         
         # Control loop timing
         self.dt = 0.1  # Time step (seconds)
@@ -306,7 +314,7 @@ class EKFSLAMNode(Node):
         dx_global = x_landmark - x_robot
         dy_global = y_landmark - y_robot
         
-        # Rotation matrix from global to local frame
+        # Rotation matrix
         # R(-yaw) = [cos(-yaw)  -sin(-yaw)]
         #           [sin(-yaw)   cos(-yaw)]
         dx_local = dx_global * math.cos(-yaw_robot) - dy_global * math.sin(-yaw_robot)
@@ -377,20 +385,22 @@ class EKFSLAMNode(Node):
         
         # Derivatives w.r.t robot position (columns 0, 1, 2)
         jH[0, 0] = -cos_yaw  # ∂(dx_local)/∂x_robot
-        jH[0, 1] = -sin_yaw  # ∂(dx_local)/∂y_robot
-        jH[0, 2] = -dx_global * sin_yaw + dy_global * cos_yaw  # ∂(dx_local)/∂yaw
+        jH[0, 1] = sin_yaw  # ∂(dx_local)/∂y_robot
+        jH[0, 2] = dx_global * sin_yaw + dy_global * cos_yaw  # ∂(dx_local)/∂yaw
         
-        jH[1, 0] = sin_yaw   # ∂(dy_local)/∂x_robot
+        jH[1, 0] = -sin_yaw   # ∂(dy_local)/∂x_robot
         jH[1, 1] = -cos_yaw  # ∂(dy_local)/∂y_robot
-        jH[1, 2] = dx_global * cos_yaw + dy_global * sin_yaw  # ∂(dy_local)/∂yaw
+        jH[1, 2] = -dx_global * cos_yaw + dy_global * sin_yaw  # ∂(dy_local)/∂yaw
         
         # Derivatives w.r.t landmark position (columns lm_id, lm_id+1)
         jH[0, lm_id] = cos_yaw      # ∂(dx_local)/∂x_landmark
-        jH[0, lm_id + 1] = sin_yaw  # ∂(dx_local)/∂y_landmark
+        jH[0, lm_id + 1] = -sin_yaw  # ∂(dx_local)/∂y_landmark
         
-        jH[1, lm_id] = -sin_yaw     # ∂(dy_local)/∂x_landmark
+        jH[1, lm_id] = sin_yaw     # ∂(dy_local)/∂x_landmark
         jH[1, lm_id + 1] = cos_yaw  # ∂(dy_local)/∂y_landmark
-        
+
+
+
         return jH
     
     def tf_to_global(self, x_robot, y_robot, yaw_robot, tf_obs):
@@ -605,6 +615,9 @@ class EKFSLAMNode(Node):
         # Store updated state and covariance
         self.xEst = xPred
         self.PEst = PPred
+        landmarks_info = [(self.landmark_tags[k], (f"{self.xEst[3 + k*2,0]:.2f}", f"{self.xEst[4 + k*2,0]:.2f}")) for k in self.landmark_tags.keys()]
+        self.get_logger().info(f'EKF-SLAM update: Position ({self.xEst[0,0]:.2f}, {self.xEst[1,0]:.2f}), Yaw {math.degrees(self.xEst[2,0]):.1f}°, waypoint {self.current_waypoint_idx}')
+        self.get_logger().info(f'landmarks: {len(self.landmark_tags)}, landmark positions: {landmarks_info}')
     
     def get_tf_observations(self):
         """
@@ -764,8 +777,15 @@ class EKFSLAMNode(Node):
         """
         # ===== EKF-SLAM UPDATE =====
         
-        # Get landmark observations from TF tree
-        tf_observations = self.get_tf_observations()
+        current_time = time.time()
+        
+        if current_time - self.last_tag_detection_time > 1:
+            self.last_tag_detection_time = current_time
+            tf_observations = self.get_tf_observations()
+        else:
+            tf_observations = []
+        # tf_observations = self.get_tf_observations()
+        
         
         # Create control input from last command (for prediction step)
         if hasattr(self, 'last_linear_vel') and hasattr(self, 'last_angular_vel'):
