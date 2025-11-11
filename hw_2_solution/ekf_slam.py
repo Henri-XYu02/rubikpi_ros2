@@ -9,6 +9,9 @@ import numpy as np
 import math
 from scipy.spatial.transform import Rotation
 import time
+import matplotlib.pyplot as plt
+from matplotlib.patches import Ellipse
+
 
 """
 EKF-SLAM implementation for landmark mapping while navigating waypoints
@@ -127,7 +130,7 @@ class EKFSLAMNode(Node):
         # Process noise covariance Q (uncertainty in motion model)
         # Q represents how much we trust our motion model
         # Diagonal matrix: [σ_x², σ_y², σ_yaw²]
-        self.Q = np.diag([0.15, 0.15, np.deg2rad(10.0)]) ** 2
+        self.Q = np.diag([0.10, 0.10, np.deg2rad(10.0)]) ** 2
         
         # Measurement noise covariance R (uncertainty in sensor)
         # R represents how much we trust our sensor measurements
@@ -135,36 +138,139 @@ class EKFSLAMNode(Node):
         self.R_tf = np.diag([0.2, 0.2]) ** 2
         
         # Navigation waypoints [x, y, yaw]
+        # self.waypoints = np.array([
+        #     [0.0,0.0, 0.0],
+        #     [0.5, 0.0, np.pi/2],
+        #     [0.5, 0.5, np.pi],
+        #     [0.0, 0.5, -np.pi/2],
+        #     [0.0,0.0, 0.0],
+        #     [0.5, 0.0, np.pi/2],
+        #     [0.5, 0.5, np.pi],
+        #     [0.0, 0.5, -np.pi/2],
+        # ])
+        self.plotted = False
+
+        # # 8-point octagon waypoints
         self.waypoints = np.array([
-            [0.0, 0.0, 0.0], 
-            [1.0, 0.0, np.pi/2],
-            [1.0, 1.0, np.pi],
-            [0.0, 1.0, -np.pi/2],
-            [0.0, 0.0, 0.0],
+            [0.5000, 0.0000, 0.3927],  # WP6 - Bottom
+            [0.8536, 0.1464, 1.1781],  # WP7 - Lower right
+            [1.0000, 0.5000, 1.9635],   # WP8 - Return to start
+            [0.8536, 0.8536, 2.7489],  # WP1 - Upper right
+            [0.5000, 1.0000, -2.7489], # WP2 - Top
+            [0.1464, 0.8536, -1.9635], # WP3 - Upper left
+            [0.0000, 0.5000, -1.1781], # WP4 - Left side
+            [0.1464, 0.1464, -0.3927], # WP5 - Lower left
+            [0.5000, 0.0000, 0.3927],  # WP6 - Bottom
+            [0.8536, 0.1464, 1.1781],  # WP7 - Lower right
+            [1.0000, 0.5000, 1.9635],   # WP8 - Return to start
+            [0.8536, 0.8536, 2.7489],  # WP1 - Upper right
+            [0.5000, 1.0000, -2.7489], # WP2 - Top
+            [0.1464, 0.8536, -1.9635], # WP3 - Upper left
+            [0.0000, 0.5000, -1.1781], # WP4 - Left side
+            [0.1464, 0.1464, -0.3927], # WP5 - Lower left
         ])
+
         # self.waypoints = np.array([
         #     [0.0, 0.0, 0.0], 
         #     [1.0, 0.0, 0],
         # ])
         
         # Navigation state variables
-        self.pid = PIDcontroller(0.8, 0.01, 0.005)
+        self.pid = PIDcontroller(0.8, 0.003, 0.001)
         self.current_waypoint_idx = 0
         self.waypoint_reached = False
-        self.tolerance = 0.15  # Position tolerance (meters)
+        self.tolerance = 0.1  # Position tolerance (meters)
         self.angle_tolerance = 0.1  # Orientation tolerance (radians)
         self.drive_backwards = False
         self.stage = 'rotate_to_goal'  # Navigation state machine
         self.fixed_rotation_vel = 0.785  # Fixed angular velocity for pure rotation
         
         self.last_tag_detection_time = 0.0
+
+        # ========== Trajectory tracking for plotting ==========
+        self.trajectory_x = []
+        self.trajectory_y = []
+        self.trajectory_yaw = []
         
         # Control loop timing
         self.dt = 0.1  # Time step (seconds)
         self.control_timer = self.create_timer(self.dt, self.control_loop)
         
         self.get_logger().info('EKF-SLAM Node initialized (3D state: x, y, yaw)')
+
+
+    # ==================== Plot ==================================
+    def save_final_plot(self):
+        """Save the final trajectory plot with landmark uncertainty ellipses"""
+        plt.ioff()  # Turn off interactive mode
         
+        fig, ax = plt.subplots(figsize=(12, 12))
+        
+        # Plot trajectory
+        ax.plot(self.trajectory_x, self.trajectory_y, 'b-', linewidth=2, label='Robot Trajectory')
+        ax.plot(self.trajectory_x[0], self.trajectory_y[0], 'go', markersize=12, label='Start')
+        ax.plot(self.trajectory_x[-1], self.trajectory_y[-1], 'ro', markersize=12, label='End')
+        
+        # Plot waypoints
+        wp_x = self.waypoints[:, 0]
+        wp_y = self.waypoints[:, 1]
+        ax.plot(wp_x, wp_y, 'g^', markersize=12, label='Waypoints', alpha=0.6)
+        
+        for i, wp in enumerate(self.waypoints):
+            ax.text(wp[0] + 0.05, wp[1] + 0.05, f'WP{i}', fontsize=10, fontweight='bold')
+        
+        # Plot landmarks with uncertainty ellipses
+        if len(self.landmark_tags) > 0:
+            for lm_idx, tag_id in self.landmark_tags.items():
+                lm_id = 3 + lm_idx * 2
+                x = self.xEst[lm_id, 0]
+                y = self.xEst[lm_id + 1, 0]
+                
+                # Get covariance for this landmark
+                cov_xx = self.PEst[lm_id, lm_id]
+                cov_yy = self.PEst[lm_id + 1, lm_id + 1]
+                cov_xy = self.PEst[lm_id, lm_id + 1]
+                
+                # Compute eigenvalues and eigenvectors for ellipse
+                cov_matrix = np.array([[cov_xx, cov_xy], [cov_xy, cov_yy]])
+                eigenvalues, eigenvectors = np.linalg.eig(cov_matrix)
+                
+                # Get ellipse parameters (95% confidence interval, chi-square = 5.991)
+                angle = np.degrees(np.arctan2(eigenvectors[1, 0], eigenvectors[0, 0]))
+                width = 2 * np.sqrt(5.991 * eigenvalues[0])
+                height = 2 * np.sqrt(5.991 * eigenvalues[1])
+                
+                # Plot landmark
+                ax.plot(x, y, 'ms', markersize=15, label='Landmark' if lm_idx == 0 else '')
+                
+                # Plot uncertainty ellipse
+                ellipse = Ellipse((x, y), width, height, angle=angle, 
+                                 facecolor='magenta', alpha=0.2, edgecolor='purple', linewidth=2)
+                ax.add_patch(ellipse)
+                
+                # Add label
+                std_x = math.sqrt(cov_xx)
+                std_y = math.sqrt(cov_yy)
+                ax.text(x + 0.1, y + 0.1, 
+                       f'Tag{tag_id}\n({x:.2f}, {y:.2f})\nσ=({std_x:.3f}, {std_y:.3f})',
+                       fontsize=9, color='purple', fontweight='bold',
+                       bbox=dict(boxstyle='round', facecolor='wheat', alpha=0.5))
+        
+        ax.set_xlabel('X Position (m)', fontsize=12)
+        ax.set_ylabel('Y Position (m)', fontsize=12)
+        ax.set_title('EKF-SLAM: Final Robot Trajectory and Landmark Map', fontsize=14, fontweight='bold')
+        ax.grid(True, alpha=0.3)
+        ax.axis('equal')
+        ax.legend(fontsize=10)
+        
+        plt.tight_layout()
+        plt.savefig('./ekf_slam_trajectory.png', dpi=300, bbox_inches='tight')
+        
+        self.get_logger().info('Saved final plot to ekf_slam_trajectory.png')
+        
+        # Show the final plot
+        plt.show()
+      
     # ==================== EKF-SLAM Functions ====================
     
     def motion_model_slam(self, x, u):
@@ -400,7 +506,6 @@ class EKFSLAMNode(Node):
         jH[1, lm_id + 1] = cos_yaw  # ∂(dy_local)/∂y_landmark
 
 
-
         return jH
     
     def tf_to_global(self, x_robot, y_robot, yaw_robot, tf_obs):
@@ -488,7 +593,7 @@ class EKFSLAMNode(Node):
         P_new[0:len(PEst), 0:len(PEst)] = PEst
         
         # Initialize new landmark uncertainty (high initial uncertainty)
-        INIT_LANDMARK_COV = 0.5  # Standard deviation in meters
+        INIT_LANDMARK_COV = 0.2  # Standard deviation in meters
         P_new[-2, -2] = INIT_LANDMARK_COV ** 2  # Variance in x
         P_new[-1, -1] = INIT_LANDMARK_COV ** 2  # Variance in y
         
@@ -611,7 +716,12 @@ class EKFSLAMNode(Node):
                 # Update covariance: P_new = (I - K*H)*P_pred
                 # This represents reduction in uncertainty due to measurement
                 PPred = (np.eye(len(xPred)) - K @ jH) @ PPred
-        
+
+        # ========== Record trajectory for plotting ==========
+        self.trajectory_x.append(self.xEst[0, 0])
+        self.trajectory_y.append(self.xEst[1, 0])
+        self.trajectory_yaw.append(self.xEst[2, 0])
+
         # Store updated state and covariance
         self.xEst = xPred
         self.PEst = PPred
@@ -645,14 +755,14 @@ class EKFSLAMNode(Node):
                     'base_link',  # Target frame (robot)
                     f'tag_{tag_id}',  # Source frame (landmark)
                     current_time,  # Time (latest)
-                    timeout=rclpy.duration.Duration(seconds=0.05)
+                    timeout=rclpy.duration.Duration(seconds=0.01)
                 )
                 
                 # Check if transform is recent (reject stale data)
                 transform_time = rclpy.time.Time.from_msg(transform.header.stamp)
                 time_diff = (self.get_clock().now() - transform_time).nanoseconds / 1e9
                 
-                if time_diff > 0.3:  # Skip transforms older than 300ms
+                if time_diff > 0.2:  # Skip transforms older than 300ms
                     continue
                 
                 # Extract 2D position in base_link frame (ignore z for 2D SLAM)
@@ -662,9 +772,10 @@ class EKFSLAMNode(Node):
                 
                 # Calculate 3D distance for range filtering
                 dist = math.sqrt(dx**2 + dy**2 + dz**2)
-                SENSOR_RANGE = 2.0  # Maximum detection range (meters)
+                SENSOR_RANGE = 2.5 # Maximum detection range (meters)
+                SENSOR_MINIMUM = 0
                 
-                if dist < SENSOR_RANGE:
+                if dist < SENSOR_RANGE and dist > SENSOR_MINIMUM:
                     # Create observation: [dx, dy] in robot's local frame
                     tf_obs = np.array([[dx], [dy]])
                     tf_observations.append((tag_id, tf_obs))
@@ -779,12 +890,12 @@ class EKFSLAMNode(Node):
         
         current_time = time.time()
         
-        if current_time - self.last_tag_detection_time > 1:
+        if current_time - self.last_tag_detection_time > 0.2:
             self.last_tag_detection_time = current_time
             tf_observations = self.get_tf_observations()
         else:
             tf_observations = []
-        # tf_observations = self.get_tf_observations()
+        # tf_observations = []
         
         
         # Create control input from last command (for prediction step)
@@ -803,6 +914,9 @@ class EKFSLAMNode(Node):
         
         # Check if all waypoints completed
         if self.current_waypoint_idx >= len(self.waypoints):
+            if not self.plotted:
+                self.save_final_plot()
+                self.plotted = True
             self.get_logger().info('All waypoints reached!')
             self.stop_robot()
             return
