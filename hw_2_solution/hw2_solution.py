@@ -109,6 +109,8 @@ class Hw2SolutionNode(Node):
         
         self.tag_positions = {}
         
+        self.obstacle_tag_positions = {}
+        
         self.waypoints = np.array([
             [0.0, 0.0, 0.0], 
             [1.0, 0.0, 0.0],
@@ -154,18 +156,32 @@ class Hw2SolutionNode(Node):
             
             for tag in tags_data:
                 tag_id = tag.get('id')
+                # tag_id looks like: 0-landmark, 1-obstacle, ...
+                tag_id, tag_type = int(tag_id.split('-')[0]), tag_id.split('-')[1]
+                
                 if tag_id is None:
                     continue
                 
-                self.tag_positions[tag_id] = {
-                    'x': float(tag['x']),
-                    'y': float(tag['y']),
-                    'z': float(tag['z']),
-                    'qx': float(tag['qx']),
-                    'qy': float(tag['qy']),
-                    'qz': float(tag['qz']),
-                    'qw': float(tag['qw'])
-                }
+                if tag_type == 'obstacle':
+                    self.obstacle_tag_positions[tag_id] = {
+                        'x': float(tag['x']),
+                        'y': float(tag['y']),
+                        'z': float(tag['z']),
+                        'qx': float(tag['qx']),
+                        'qy': float(tag['qy']),
+                        'qz': float(tag['qz']),
+                        'qw': float(tag['qw'])
+                    }
+                else:
+                    self.tag_positions[tag_id] = {
+                        'x': float(tag['x']),
+                        'y': float(tag['y']),
+                        'z': float(tag['z']),
+                        'qx': float(tag['qx']),
+                        'qy': float(tag['qy']),
+                        'qz': float(tag['qz']),
+                        'qw': float(tag['qw'])
+                    }
                 
                 self.get_logger().info(
                     f'Loaded tag {tag_id}: pos=({tag["x"]:.2f}, {tag["y"]:.2f}, {tag["z"]:.2f})'

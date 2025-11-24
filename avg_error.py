@@ -9,33 +9,53 @@ import math
 
 # Ground truth landmark positions
 ground_truth = {
-    0: {'x': 2.0, 'y': 0.0},
-    1: {'x': -0.05, 'y': -0.6},
-    2: {'x': 1.35, 'y': 1.5},
-    3: {'x': -0.9, 'y': 0.1},
-    4: {'x': -0.5, 'y': 0.97},
-    5: {'x': 0.0, 'y': 1.5},
-    7: {'x': 1.1, 'y': -0.6},
-    8: {'x': 2.0, 'y': 0.9},
+    0: {'x': 1, 'y': -1},
+    1: {'x': 2, 'y': 0},
+    2: {'x': 0, 'y': -1},
+    3: {'x': 1, 'y': 2},
+    4: {'x': 0, 'y': 2},
+    5: {'x': -1, 'y': 0},
+    7: {'x': -1, 'y': 1},
+    8: {'x': 2, 'y': 1},
 }
 
 # Estimated positions from EKF-SLAM
 # YOU NEED TO UPDATE THESE VALUES FROM YOUR ROBOT'S OUTPUT
 # Copy the final landmark positions from your terminal output
+
+# square multiple times
 estimated = {
     # Format: tag_id: {'x': estimated_x, 'y': estimated_y}
     # Example (replace with your actual values):
     # 0: {'x': 1.98, 'y': 0.02},
     # 1: {'x': -0.04, 'y': -0.58},
     # Add your estimated values here...
-    0: {'x': 1.78, 'y':-0.10},
-    1: {'x': 1.05, 'y':-0.66},
-    2: {'x': 1.13, 'y':1.90},
-    3: {'x': 0.01, 'y':-0.22},
-    4: {'x': -0.74, 'y':0.35},
-    5: {'x': -0.43, 'y':1.15},
-    7: {'x': 1.52, 'y':-0.81},
-    8: {'x': 1.77, 'y':0.80},
+    0: {'x': 1.53, 'y':-1.12},
+    1: {'x': 2.09, 'y':0.18},
+    2: {'x': 0.58, 'y':-1.09},
+    3: {'x': 0.96, 'y':1.97},
+    4: {'x': -0.05, 'y':2.18},
+    5: {'x': -1.03, 'y':-0.55},
+    7: {'x': -0.79, 'y':0.66},
+    8: {'x': 2.43, 'y':1.36},
+}
+
+
+# Square one Round
+estimated = {
+    # Format: tag_id: {'x': estimated_x, 'y': estimated_y}
+    # Example (replace with your actual values):
+    # 0: {'x': 1.98, 'y': 0.02},
+    # 1: {'x': -0.04, 'y': -0.58},
+    # Add your estimated values here...
+    0: {'x': 0.56, 'y':-0.68},
+    1: {'x': 1.50, 'y':0.29},
+    2: {'x': -0.52, 'y':-0.91},
+    3: {'x': 0.39, 'y':2.37},
+    4: {'x': -0.22, 'y':2.50},
+    5: {'x': -2.24, 'y':0.38},
+    7: {'x': -1.83, 'y':1.68},
+    8: {'x': 1.53, 'y':1.27},
 }
 
 def calculate_errors(ground_truth, estimated):

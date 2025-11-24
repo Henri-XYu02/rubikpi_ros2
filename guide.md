@@ -16,3 +16,6 @@ ros2 run robot_control vision_waypoint_follower
 ros2 run hw_1_solution motor_control
 
 ros2 launch robot_control waypoint_follow_launch.py
+
+![alt text](image.png)
+
