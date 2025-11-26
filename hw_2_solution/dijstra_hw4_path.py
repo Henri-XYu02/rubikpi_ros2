@@ -11,13 +11,10 @@ import time
 import math
 from ament_index_python.packages import get_package_share_directory
 from scipy.spatial.transform import Rotation
-
-# --- NEW IMPORTS FOR PATH PLANNING ---
 import matplotlib.pyplot as plt
 import heapq
 import random
 import sys
-# -------------------------------------
 
 """
 Helper Class for Path Planning (Homework Requirement)
@@ -25,13 +22,13 @@ Helper Class for Path Planning (Homework Requirement)
 class PathPlanner:
     def __init__(self):
         # Environment Setup
-        self.width = 2.5
-        self.height = 2.5
+        self.width = 2.4
+        self.height = 2.4
         
         # Obstacle: 0.3x0.3m in the middle (1.25, 1.25)
         # Bounds: [x_min, x_max, y_min, y_max]
-        center = 1.25
-        half_size = 0.20  # 0.3 / 2
+        center = 1.2
+        half_size = 0.15  # 0.3 / 2
         self.obs = {
             'x_min': center - half_size,
             'x_max': center + half_size,
@@ -49,7 +46,7 @@ class PathPlanner:
             return False
             
         # Check obstacle collision (add small buffer for safety)
-        buffer = 0.05
+        buffer = 0.5
         if (x > self.obs['x_min'] - buffer and x < self.obs['x_max'] + buffer and
             y > self.obs['y_min'] - buffer and y < self.obs['y_max'] + buffer):
             return False
@@ -60,6 +57,12 @@ class PathPlanner:
         """Check if line segment p1-p2 intersects the obstacle rectangle"""
         min_x, max_x = self.obs['x_min'], self.obs['x_max']
         min_y, max_y = self.obs['y_min'], self.obs['y_max']
+
+        buffer = 0.5
+        min_x = min_x - buffer
+        min_y = min_y - buffer
+        max_x = max_x + buffer
+        max_y = max_y + buffer
 
         # 1. Check if either point is inside
         if (min_x <= p1[0] <= max_x and min_y <= p1[1] <= max_y) or \
@@ -196,7 +199,6 @@ class PathPlanner:
         plt.savefig('new_dijstra.png')
         plt.close(fig)
 
-
 """
 The class of the pid controller for differential drive robot.
 """
@@ -293,11 +295,14 @@ class Hw2SolutionNode(Node):
         self.base_frame = 'base_link'
         
         self.tag_positions = {}
-        
-        # --- MODIFIED SECTION: PATH PLANNING INTEGRATION ---
-        
-        # 1. Define Start and Goal (Diagonal axes in 2.5x2.5 area)
-        start_pos = (0.0, 0.0)
+
+        # self.waypoints = np.array([
+        #     [0.0, 0.0, 0.0], 
+        #     [1.47, 0.97, 0.0],
+        #     [2.0, 2.0, np.pi]
+        # ])
+
+        start_pos = (0.5, 0.5)
         goal_pos = (2.0, 2.0) # Using 2.0 to stay safely within 2.5m bounds
         
         # 2. Run Path Planner
@@ -314,9 +319,7 @@ class Hw2SolutionNode(Node):
         
         # 4. Plot (Blocking call - close window to continue)
         self.planner.plot_results(path_points)
-        
-        # 5. Convert path_points (x,y) to numpy waypoints (x,y,theta) for the controller
-        # We calculate theta to point towards the next waypoint
+
         final_waypoints = []
         for i in range(len(path_points)):
             x, y = path_points[i]
@@ -330,13 +333,18 @@ class Hw2SolutionNode(Node):
             final_waypoints.append([x, y, yaw])
             
         self.waypoints = np.array(final_waypoints)
-        
-        # --- END MODIFIED SECTION ---
+
+
+
+
+
+
+
         
         self.pid = PIDcontroller(0.8, 0.01, 0.005)
         
-        self.current_state = np.array([0.0, 0.0, 0.0])
-        self.obs_current_state = np.array([0.0, 0.0, 0.0])
+        self.current_state = np.array([0.5, 0.5, 0.0])
+        self.obs_current_state = np.array([0.5, 0.5, 0.0])
         
         self.current_waypoint_idx = 0
         self.waypoint_reached = False
