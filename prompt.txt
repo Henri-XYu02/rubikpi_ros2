@@ -1,4 +1,0 @@
-I am supposed to utilize the camera to traverse certain waypoints. I will be running the code on a rubikpi.
-Read the robot_vision code and tell me how to get image from camera, and how can I calibrate the camera.
-I can place some coke cans on the ground as landmarks and use a YOLO model to detect objects.
-How can I write the control loop to traverse those waypoints?
