@@ -524,50 +524,39 @@ class Hw2SolutionNode(Node):
         Based on the arena diagram with LM1 and LM2 markers
         """
         waypoints = []
-        
         # Estimated arena dimensions from the diagram
         x_min, x_max = 0.0, 2.5  # Adjust based on actual arena size
         y_min, y_max = 0.0, 2.5
-
         # Coverage parameters
         stripe_spacing = 0.5  # Distance between parallel sweeps
         margin = 0.5  # Keep away from walls
-        
         # Adjust bounds with margin
         x_start = x_min + margin
         x_end = x_max - margin
         y_start = y_min + margin
         y_end = y_max - margin
-        
         # Start position
         waypoints.append([x_start, y_start, 0.0])
-        
         # Generate horizontal sweeping pattern
         y_current = y_start
         direction = 1  # 1 for right, -1 for left
-        
         while y_current <= y_end:
             if direction == 1:
                 # Move right
                 waypoints.append([x_end, y_current, 0.0])
             else:
                 # Move left
-                waypoints.append([x_start, y_current, np.pi])
-            
+                waypoints.append([x_start, y_current, np.pi]) 
             # Move to next stripe
-            y_current += stripe_spacing
-            
+            y_current += stripe_spacing  
             if y_current <= y_end:
                 if direction == 1:
                     waypoints.append([x_end, y_current, np.pi/2])
                 else:
-                    waypoints.append([x_start, y_current, np.pi/2])
-                
-                direction *= -1  # Reverse direction
-        
+                    waypoints.append([x_start, y_current, np.pi/2])       
+                direction *= -1  # Reverse direction   
         # Return to start
-        waypoints.append([x_start, y_start, 0.0])
-        
+        waypoints.append([x_start, y_start, 0.0])  
         return np.array(waypoints)
 
 def main(args=None):

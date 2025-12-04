@@ -9,14 +9,18 @@ import math
 
 # Ground truth landmark positions
 ground_truth = {
-    0: {'x': 1, 'y': -1},
-    1: {'x': 2, 'y': 0},
-    2: {'x': 0, 'y': -1},
-    3: {'x': 1, 'y': 2},
-    4: {'x': 0, 'y': 2},
-    5: {'x': -1, 'y': 0},
-    7: {'x': -1, 'y': 1},
-    8: {'x': 2, 'y': 1},
+    0: {'x': 2.5, 'y': 0.2},    # Right wall, bottom
+    1: {'x': 0.0, 'y': 2.3},    # Left wall, top
+    2: {'x': 2.5, 'y': 2.3},    # Right wall, top
+    3: {'x': 2.3, 'y': 2.5},    # Top wall, right
+    4: {'x': 1.2, 'y': 2.5},    # Top wall, middle
+    5: {'x': 0.2, 'y': 2.5},    # Top wall, left
+    6: {'x': 0.0, 'y': 1.3},    # Left wall, middle
+    7: {'x': 0.0, 'y': 0.2},    # Left wall, bottom
+    8: {'x': 2.5, 'y': 1.3},    # Right wall, middle
+    9: {'x': 2.3, 'y': 0.0},    # Bottom wall, right
+    10: {'x': 1.3, 'y': 0.0},   # Bottom wall, middle
+    11: {'x': 0.2, 'y': 0.0},   # Bottom wall, left
 }
 
 # Estimated positions from EKF-SLAM
@@ -30,33 +34,20 @@ estimated = {
     # 0: {'x': 1.98, 'y': 0.02},
     # 1: {'x': -0.04, 'y': -0.58},
     # Add your estimated values here...
-    0: {'x': 1.53, 'y':-1.12},
-    1: {'x': 2.09, 'y':0.18},
-    2: {'x': 0.58, 'y':-1.09},
-    3: {'x': 0.96, 'y':1.97},
-    4: {'x': -0.05, 'y':2.18},
-    5: {'x': -1.03, 'y':-0.55},
-    7: {'x': -0.79, 'y':0.66},
-    8: {'x': 2.43, 'y':1.36},
+    0: {'x': 2.41, 'y':0.24},
+    1: {'x': -0.06, 'y':2.22},
+    2: {'x': 2.15, 'y':2.41},
+    3: {'x': 2.09, 'y':2.73},
+    4: {'x': 1.10, 'y':2.90},
+    5: {'x': 0.10, 'y':2.65},
+    6: {'x': 0.13, 'y':1.42},
+    7: {'x': 0.39, 'y':0.37},
+    8: {'x': 2.19, 'y':1.41},
+    9: {'x': 2.52, 'y':-0.07},
+    10: {'x': 1.73, 'y':-0.23},
+    11: {'x': 0.56, 'y':0.01},
 }
 
-
-# Square one Round
-estimated = {
-    # Format: tag_id: {'x': estimated_x, 'y': estimated_y}
-    # Example (replace with your actual values):
-    # 0: {'x': 1.98, 'y': 0.02},
-    # 1: {'x': -0.04, 'y': -0.58},
-    # Add your estimated values here...
-    0: {'x': 0.56, 'y':-0.68},
-    1: {'x': 1.50, 'y':0.29},
-    2: {'x': -0.52, 'y':-0.91},
-    3: {'x': 0.39, 'y':2.37},
-    4: {'x': -0.22, 'y':2.50},
-    5: {'x': -2.24, 'y':0.38},
-    7: {'x': -1.83, 'y':1.68},
-    8: {'x': 1.53, 'y':1.27},
-}
 
 def calculate_errors(ground_truth, estimated):
     """
