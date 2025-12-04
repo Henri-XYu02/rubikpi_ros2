@@ -121,6 +121,8 @@ class EKFSLAMNode(Node):
         # EKF-SLAM State (3D robot state: x, y, yaw)
         # State vector: x = [x_robot, y_robot, yaw_robot, x_lm1, y_lm1, ...]
         self.xEst = np.zeros((3, 1))  # Initial state: robot at origin with zero yaw
+        self.xEst[0, 0] = 0.5  # x position
+        self.xEst[1, 0] = 0.5  # y position
         self.PEst = np.eye(3) * 0.05   # Initial covariance (low uncertainty)
         
         # Landmark database: maps landmark_index -> tag_id
@@ -130,7 +132,7 @@ class EKFSLAMNode(Node):
         # Process noise covariance Q (uncertainty in motion model)
         # Q represents how much we trust our motion model
         # Diagonal matrix: [σ_x², σ_y², σ_yaw²]
-        self.Q = np.diag([0.10, 0.10, np.deg2rad(10.0)]) ** 2
+        self.Q = np.diag([0.2, 0.2, np.deg2rad(20.0)]) ** 2
         
         # Measurement noise covariance R (uncertainty in sensor)
         # R represents how much we trust our sensor measurements
@@ -138,37 +140,38 @@ class EKFSLAMNode(Node):
         self.R_tf = np.diag([0.2, 0.2]) ** 2
         
         # Navigation waypoints [x, y, yaw]
-        # self.waypoints = np.array([
-        #     [0.0,0.0, 0.0],
-        #     [0.5, 0.0, np.pi/2],
-        #     [0.5, 0.5, np.pi],
-        #     [0.0, 0.5, -np.pi/2],
-        #     [0.0,0.0, 0.0],
-        #     [0.5, 0.0, np.pi/2],
-        #     [0.5, 0.5, np.pi],
-        #     [0.0, 0.5, -np.pi/2],
-        # ])
+        self.waypoints = np.array([
+            [0.5        ,0.5,        0.        ],
+            [2.         ,0.5 ,       0.        ],
+            [2.         ,1.         ,1.57079633],
+            [0.5        ,1.,         3.14159265],
+            [0.5        ,1.5,        1.57079633],
+            [2.         ,1.5,        0.        ],
+            [2.         ,2.,         1.57079633],
+            [0.5        ,2.,         3.14159265],
+            [0.5        ,0.5,        0.        ],
+        ])
         self.plotted = False
 
         # # 8-point octagon waypoints
-        self.waypoints = np.array([
-            [0.5000, 0.0000, 0.3927],  # WP6 - Bottom
-            [0.8536, 0.1464, 1.1781],  # WP7 - Lower right
-            [1.0000, 0.5000, 1.9635],   # WP8 - Return to start
-            [0.8536, 0.8536, 2.7489],  # WP1 - Upper right
-            [0.5000, 1.0000, -2.7489], # WP2 - Top
-            [0.1464, 0.8536, -1.9635], # WP3 - Upper left
-            [0.0000, 0.5000, -1.1781], # WP4 - Left side
-            [0.1464, 0.1464, -0.3927], # WP5 - Lower left
-            [0.5000, 0.0000, 0.3927],  # WP6 - Bottom
-            [0.8536, 0.1464, 1.1781],  # WP7 - Lower right
-            [1.0000, 0.5000, 1.9635],   # WP8 - Return to start
-            [0.8536, 0.8536, 2.7489],  # WP1 - Upper right
-            [0.5000, 1.0000, -2.7489], # WP2 - Top
-            [0.1464, 0.8536, -1.9635], # WP3 - Upper left
-            [0.0000, 0.5000, -1.1781], # WP4 - Left side
-            [0.1464, 0.1464, -0.3927], # WP5 - Lower left
-        ])
+        # self.waypoints = np.array([
+        #     [0.5000, 0.0000, 0.3927],  # WP6 - Bottom
+        #     [0.8536, 0.1464, 1.1781],  # WP7 - Lower right
+        #     [1.0000, 0.5000, 1.9635],   # WP8 - Return to start
+        #     [0.8536, 0.8536, 2.7489],  # WP1 - Upper right
+        #     [0.5000, 1.0000, -2.7489], # WP2 - Top
+        #     [0.1464, 0.8536, -1.9635], # WP3 - Upper left
+        #     [0.0000, 0.5000, -1.1781], # WP4 - Left side
+        #     [0.1464, 0.1464, -0.3927], # WP5 - Lower left
+        #     [0.5000, 0.0000, 0.3927],  # WP6 - Bottom
+        #     [0.8536, 0.1464, 1.1781],  # WP7 - Lower right
+        #     [1.0000, 0.5000, 1.9635],   # WP8 - Return to start
+        #     [0.8536, 0.8536, 2.7489],  # WP1 - Upper right
+        #     [0.5000, 1.0000, -2.7489], # WP2 - Top
+        #     [0.1464, 0.8536, -1.9635], # WP3 - Upper left
+        #     [0.0000, 0.5000, -1.1781], # WP4 - Left side
+        #     [0.1464, 0.1464, -0.3927], # WP5 - Lower left
+        # ])
 
         # self.waypoints = np.array([
         #     [0.0, 0.0, 0.0], 
@@ -176,7 +179,7 @@ class EKFSLAMNode(Node):
         # ])
         
         # Navigation state variables
-        self.pid = PIDcontroller(0.8, 0.003, 0.001)
+        self.pid = PIDcontroller(0.8, 0.005, 0.001)
         self.current_waypoint_idx = 0
         self.waypoint_reached = False
         self.tolerance = 0.1  # Position tolerance (meters)
@@ -747,8 +750,8 @@ class EKFSLAMNode(Node):
         tf_observations = []
         current_time = rclpy.time.Time()  # Get latest available transform
 
-        # Try to detect tags 0-9 (adjust range based on your setup)
-        for tag_id in range(10):
+        # Try to detect tags 0-11 (adjust range based on your setup)
+        for tag_id in range(12):
             try:
                 # Look up transform from base_link to tag_{tag_id}
                 transform = self.tf_buffer.lookup_transform(
